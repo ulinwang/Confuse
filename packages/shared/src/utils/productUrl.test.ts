@@ -3,6 +3,7 @@ import { TableViewPresetTableName } from "../domain/table-view-presets";
 import {
   buildCurrentPageSavedViewPermalink,
   buildExperimentPath,
+  buildNotebookPath,
   parseSavedViewFromURL,
   tableViewPresetPermalinkUsesCurrentPath,
 } from "./productUrl";
@@ -34,6 +35,28 @@ describe("buildExperimentPath", () => {
     ).toBe(
       "/project/proj_1/experiments/results?baseline=exp_1&filter=level%3BstringOptions%3B%3Bany+of%3BERROR",
     );
+  });
+});
+
+describe("buildNotebookPath", () => {
+  it("links to the notebook's draft without a version", () => {
+    expect(buildNotebookPath({ notebookId: "nb_1" })).toBe("/notebooks/nb_1");
+    expect(
+      buildNotebookPath({ notebookId: "nb_1", draftDocumentId: "detail_1" }),
+    ).toBe("/notebooks/nb_1?draftDocument=detail_1");
+  });
+
+  it("can pin the notebook or a document to a published version", () => {
+    expect(buildNotebookPath({ notebookId: "nb_1", version: 2 })).toBe(
+      "/notebooks/nb_1?version=2",
+    );
+    expect(
+      buildNotebookPath({
+        notebookId: "nb/1",
+        documentId: "doc 1",
+        version: 2,
+      }),
+    ).toBe("/notebooks/nb%2F1/doc%201?version=2");
   });
 });
 
