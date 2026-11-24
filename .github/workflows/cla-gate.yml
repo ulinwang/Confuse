@@ -38,6 +38,7 @@ jobs:
             await publish("failure", "CLA verification incomplete. Edit PR title/body to retry.");
             /** Fork author attribution does not prove who can push to the branch. */
             let exempt = current.every(pr => pr.head.repo?.full_name === `${owner}/${repo}`);
+            if (github.repository !== "langfuse/langfuse" && exempt) return publish("success", "Same-repository contributors have write access.");
             const checked = new Set([49699333, 41898282, 206951365, 199161495]); // Dependabot, Actions, Cursor.
             for (const pr of current) {
               if (!exempt) break;
