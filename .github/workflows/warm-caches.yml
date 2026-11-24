@@ -31,7 +31,7 @@ jobs:
   warm:
     if: github.ref == 'refs/heads/main'
     # Match the pipeline's runner provider for cache compatibility.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     name: warm (${{ matrix.cache_scope }})
     env:
@@ -109,7 +109,7 @@ jobs:
     # but main (e.g. a manual dispatch on a branch) would only add an unused
     # entry.
     if: github.ref == 'refs/heads/main'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     env:
       # Mirror the e2e jobs so the web build — and its turbo hash — match.

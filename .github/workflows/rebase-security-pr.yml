@@ -18,7 +18,7 @@ jobs:
       github.repository == 'langfuse/langfuse' &&
       github.event.issue.pull_request != null &&
       github.event.comment.body == '/rebase-security-pr'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 30
     outputs:
       authorized: ${{ steps.authorize.outputs.authorized }}
@@ -168,7 +168,7 @@ jobs:
   report:
     needs: repair
     if: always() && needs.repair.outputs.authorized == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     permissions:
       pull-requests: write

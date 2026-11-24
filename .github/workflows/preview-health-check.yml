@@ -32,7 +32,7 @@ concurrency:
 jobs:
   check:
     name: Check labeled previews are serving
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     # Same preview-system feature gate as preview-build / preview-stale-cleanup:
     # unset => system off, nothing to poll.
     if: vars.AWS_PREVIEW_ECR_PUSH_ROLE_ARN != ''

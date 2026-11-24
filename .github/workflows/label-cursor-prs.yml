@@ -21,7 +21,7 @@ concurrency:
 jobs:
   label-cursor:
     name: Apply cursor label
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       issues: write
       pull-requests: write

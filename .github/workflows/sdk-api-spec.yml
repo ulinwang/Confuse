@@ -37,7 +37,7 @@ env:
 
 jobs:
   generate-sdk-api-specs:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     outputs:
       python_has_changes: ${{ steps.prepare-python-sdk.outputs.has_changes }}
       python_branch_name: ${{ steps.prepare-python-sdk.outputs.branch_name }}
@@ -229,7 +229,7 @@ jobs:
   push-python-sdk:
     needs: generate-sdk-api-specs
     if: needs.generate-sdk-api-specs.outputs.python_has_changes == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     steps:
       - name: Download Python SDK update
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -292,7 +292,7 @@ jobs:
   push-typescript-sdk:
     needs: generate-sdk-api-specs
     if: needs.generate-sdk-api-specs.outputs.typescript_has_changes == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     steps:
       - name: Download TypeScript SDK update
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -358,7 +358,7 @@ jobs:
       - push-python-sdk
       - push-typescript-sdk
     if: failure()
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       actions: read

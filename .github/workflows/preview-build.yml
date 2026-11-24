@@ -65,7 +65,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.state == 'open' &&
       (github.event.action != 'labeled' || github.event.label.name == 'preview')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       pull-requests: write
@@ -158,7 +158,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.state == 'open' &&
       (github.event.action != 'labeled' || github.event.label.name == 'preview')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       id-token: write
@@ -289,7 +289,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.state == 'open' &&
       (github.event.action != 'labeled' || github.event.label.name == 'preview')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     continue-on-error: true
     permissions:
       contents: read
@@ -422,7 +422,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.state == 'open' &&
       (github.event.action != 'labeled' || github.event.label.name == 'preview')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       pull-requests: write
