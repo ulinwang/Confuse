@@ -69,6 +69,9 @@ import { V4MigrationTopBannerView } from "@/src/features/v4-migration/V4Migratio
 import { AppShell } from "@/src/features/app-shell/components/AppShell";
 import { AppShellSidebarPanel } from "@/src/features/app-shell/components/AppShellSidebarPanel";
 import { useAppShellVariant } from "@/src/features/app-shell/hooks/useAppShellVariant";
+import { DesktopOnboardingModal } from "@/src/features/desktop-onboarding/DesktopOnboardingModal";
+import { useConfuseDesktopBridge } from "@/src/features/notification-center/bridge";
+import { useDesktopFirstRunComplete } from "@/src/features/notification-center/desktopStore";
 
 const CommandMenu = dynamic(
   () =>
@@ -134,6 +137,10 @@ export function AuthenticatedLayout({
   const { isLangfuseCloud, region: currentRegion } = useLangfuseCloudRegion();
   const [featurePreviewOpen, setFeaturePreviewOpen] = useState(false);
   const [internalViewModeOpen, setInternalViewModeOpen] = useState(false);
+  const [desktopOnboardingDismissed, setDesktopOnboardingDismissed] =
+    useState(false);
+  const desktopBridge = useConfuseDesktopBridge();
+  const desktopFirstRunComplete = useDesktopFirstRunComplete();
   const internalViewMode = useInternalViewMode();
   const router = useRouter();
   const { data: session } = useSession();
@@ -200,6 +207,15 @@ export function AuthenticatedLayout({
             name: "View mode",
             handoff: "dialog" as const,
             onClick: () => setInternalViewModeOpen(true),
+          },
+        ]
+      : []),
+    ...(desktopBridge
+      ? [
+          {
+            type: "link" as const,
+            name: "Desktop setup",
+            href: "/desktop-onboarding",
           },
         ]
       : []),
@@ -370,6 +386,14 @@ export function AuthenticatedLayout({
           </ClassicNavigationProvider>
         </SidebarProvider>
       )}
+      {desktopBridge &&
+      desktopFirstRunComplete === false &&
+      !desktopOnboardingDismissed ? (
+        <DesktopOnboardingModal
+          bridge={desktopBridge}
+          onClose={() => setDesktopOnboardingDismissed(true)}
+        />
+      ) : null}
       {internalViewMode.available && (
         <InternalViewModeDialog
           open={internalViewModeOpen}
