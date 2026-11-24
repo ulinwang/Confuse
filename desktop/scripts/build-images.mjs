@@ -34,7 +34,12 @@ function buildImage(dockerfile, image, push) {
   return new Promise((resolve, reject) => {
     const memoryArgs =
       dockerfile === "web/Dockerfile"
-        ? ["--build-arg", "NODE_BUILD_OPTIONS=--max-old-space-size=3072"]
+        ? [
+            "--build-arg",
+            "NODE_BUILD_OPTIONS=--max-old-space-size=3072",
+            "--build-arg",
+            "CONFUSE_BUILD_WORKERS=1",
+          ]
         : [];
     const args = push
       ? [

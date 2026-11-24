@@ -251,6 +251,8 @@ ENV NEXT_MANUAL_SIG_HANDLE true
 ENV CI true
 
 ARG NODE_BUILD_OPTIONS=--max-old-space-size-percentage=75
+ARG CONFUSE_BUILD_WORKERS
+ENV CONFUSE_BUILD_WORKERS=$CONFUSE_BUILD_WORKERS
 RUN NODE_OPTIONS="$NODE_BUILD_OPTIONS" turbo run build --filter=web...
 
 # Next copies .next/server/pages into the standalone output wholesale, including

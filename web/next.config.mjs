@@ -174,6 +174,9 @@ const nextConfig = {
     browserToTerminal: true,
   },
   experimental: {
+    ...(process.env.CONFUSE_BUILD_WORKERS
+      ? { cpus: Number(process.env.CONFUSE_BUILD_WORKERS) }
+      : {}),
     // Ephemeral CI builds can skip writing compiler state they never restore.
     ...(process.env.NEXT_DISABLE_BUILD_CACHE === "true"
       ? { turbopackFileSystemCacheForBuild: false }
