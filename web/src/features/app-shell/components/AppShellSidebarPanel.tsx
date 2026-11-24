@@ -24,6 +24,9 @@ import {
 } from "@/src/features/app-shell/components/SidebarUserMenu";
 import { useSidebarSurface } from "@/src/features/app-shell/contexts/SidebarSurfaceProvider";
 import { useV4UpgradeUiEnabled } from "@/src/features/v4-migration/useV4UpgradeUiEnabled";
+import { NotificationCenter } from "@/src/features/notification-center/NotificationCenter";
+import { useConfuseDesktopAvailability } from "@/src/features/notification-center/bridge";
+import { Bell } from "@langfuse/icons";
 
 type GroupedNavigationItems = {
   ungrouped: NavigationItem[];
@@ -57,6 +60,7 @@ export function AppShellSidebarPanel({
   const activeNotifications = v4UpgradeUiEnabled
     ? []
     : getActiveSidebarNotifications(notificationState.dismissedIds);
+  const isConfuseDesktop = useConfuseDesktopAvailability();
   const isDemoProject = Boolean(
     isLangfuseCloud &&
     env.NEXT_PUBLIC_DEMO_ORG_ID &&
@@ -104,6 +108,41 @@ export function AppShellSidebarPanel({
         <SidebarNavigation label="More" items={secondaryNavigation} />
       </SidebarPanel.Body>
       <SidebarPanel.Footer>
+        {isConfuseDesktop && (
+          <NotificationCenter>
+            {({ unreadCount, Trigger }) => (
+              <Trigger asChild>
+                <button
+                  type="button"
+                  aria-label={
+                    unreadCount > 0
+                      ? `Notifications, ${unreadCount} unread`
+                      : "Notifications"
+                  }
+                  className={cn(
+                    "text-muted-foreground hover:bg-sidebar-accent focus-visible:ring-sidebar-ring rounded-md text-xs outline-hidden focus-visible:ring-2",
+                    motion.version,
+                  )}
+                >
+                  <span className={motion.iconLane}>
+                    <Bell size="base" />
+                    {unreadCount > 0 && (
+                      <span className="bg-destructive text-destructive-foreground absolute -top-1 -right-1 rounded-full px-1 text-[10px]">
+                        {unreadCount > 99 ? "99+" : unreadCount}
+                      </span>
+                    )}
+                  </span>
+                  <span
+                    className={cn(motion.identity, motion.label)}
+                    data-surface={surface}
+                  >
+                    Notifications
+                  </span>
+                </button>
+              </Trigger>
+            )}
+          </NotificationCenter>
+        )}
         <SidebarVersionMenu state={versionState}>
           {({ Trigger, triggerProps }) => (
             <Trigger asChild>
