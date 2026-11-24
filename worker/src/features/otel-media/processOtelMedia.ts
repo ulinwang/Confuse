@@ -17,6 +17,7 @@ import {
   uploadMediaForTrace,
 } from "@langfuse/shared/src/server";
 import { MediaAssociationOrigin } from "@langfuse/shared";
+import { uploadOtelMedia } from "../otel-ingestion/shadow/media";
 
 const MEDIA_FIELDS = ["input", "output", "metadata"] as const;
 
@@ -98,9 +99,21 @@ export async function processOtelEventMedia(params: {
             mediaBucket,
             mediaPrefix,
             uploadMedia: (uploadParams) =>
-              uploadMediaForTrace({
-                ...uploadParams,
+              uploadOtelMedia({
+                projectId: uploadParams.projectId,
+                traceId: uploadParams.traceId,
+                observationId: uploadParams.observationId,
+                field: uploadParams.field,
+                contentType: uploadParams.contentType,
                 origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
+                loadBody: async () => uploadParams.contentBytes,
+                upload: (contentBytes, sha256Hash) =>
+                  uploadMediaForTrace({
+                    ...uploadParams,
+                    contentBytes,
+                    ...(sha256Hash ? { sha256Hash } : {}),
+                    origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
+                  }),
               }),
           });
 

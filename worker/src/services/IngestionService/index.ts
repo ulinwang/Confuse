@@ -71,6 +71,7 @@ import {
 import { randomUUID } from "crypto";
 import { SpanKind } from "@opentelemetry/api";
 import { ClickhouseReadSkipCache } from "../../utils/clickhouseReadSkipCache";
+import { otelShadowScope } from "../../features/otel-ingestion/shadow/context";
 import { applyObservationFieldOverflow } from "../../features/observation-field-overflow/processObservationFieldOverflow";
 
 /**
@@ -500,7 +501,24 @@ export class IngestionService {
             "utf8",
           ),
         };
-    this.clickHouseWriter.addToQueue(TableName.EventsFull, recordToInsert);
+    const shadow = otelShadowScope.getStore();
+    if (shadow) {
+      shadow.track(
+        {
+          traceId: recordToInsert.trace_id,
+          spanId: recordToInsert.span_id,
+          startTime: recordToInsert.start_time,
+        },
+        (onTerminal) =>
+          this.clickHouseWriter.addToQueue(
+            TableName.EventsFull,
+            recordToInsert,
+            { onTerminal },
+          ),
+      );
+    } else {
+      this.clickHouseWriter.addToQueue(TableName.EventsFull, recordToInsert);
+    }
     return recordToInsert;
   }
 

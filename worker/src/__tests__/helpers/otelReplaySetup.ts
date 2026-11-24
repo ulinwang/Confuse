@@ -10,6 +10,8 @@ const otelReplayMocks = vi.hoisted(() => ({
   fetchEvalRules: vi.fn(),
   hasNoEvalConfigsCache: vi.fn(),
   createEvalSchedulerDeps: vi.fn(),
+  recordDistribution: vi.fn(),
+  recordIncrement: vi.fn(),
   scheduleObservationEvals: vi.fn(),
 }));
 
@@ -47,6 +49,8 @@ vi.mock("@langfuse/shared/src/server", async (importOriginal) => ({
     }
   },
   uploadMediaForTrace: otelReplayMocks.uploadMediaForTrace,
+  recordDistribution: otelReplayMocks.recordDistribution,
+  recordIncrement: otelReplayMocks.recordIncrement,
 }));
 
 vi.mock("../../features/evaluation/fetchEvalRules", () => ({
@@ -106,6 +110,8 @@ type ReplayEnvironmentOptions = {
   overflowSizeLimitBytes?: number;
   writeMode?: "events_only" | "dual";
   directImplementation?: "ts" | "rust";
+  shadowSampleRate?: number;
+  clickhouseMaxAttempts?: number;
   v4NativeOtelBehaviour?: "dual_write" | "direct";
 };
 
@@ -121,6 +127,8 @@ export function configureOtelReplayEnvironment(
     LANGFUSE_EVENTS_DISPATCH_ENABLED: env.LANGFUSE_EVENTS_DISPATCH_ENABLED,
     LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS:
       env.LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS,
+    LANGFUSE_OTEL_NATIVE_SHADOW_SAMPLE_RATE:
+      env.LANGFUSE_OTEL_NATIVE_SHADOW_SAMPLE_RATE,
     LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED: env.LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED,
     LANGFUSE_OTEL_EARLY_MEDIA_EXTRACTION_ENABLED:
       env.LANGFUSE_OTEL_EARLY_MEDIA_EXTRACTION_ENABLED,
@@ -144,7 +152,9 @@ export function configureOtelReplayEnvironment(
   Object.assign(env, {
     NEXT_PUBLIC_LANGFUSE_CLOUD_REGION: undefined,
     LANGFUSE_EVENTS_DISPATCH_ENABLED: "false",
-    LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS: 3,
+    LANGFUSE_INGESTION_CLICKHOUSE_MAX_ATTEMPTS:
+      options.clickhouseMaxAttempts ?? 3,
+    LANGFUSE_OTEL_NATIVE_SHADOW_SAMPLE_RATE: options.shadowSampleRate ?? 0,
     LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED: options.mediaUploadEnabled
       ? "true"
       : "false",

@@ -20,7 +20,11 @@ import {
 } from "../traceDispatch/traceRuleRecording";
 
 /** Prepare rules and own the trace-activity buffer for one ingestion batch. */
-export function createEvalSchedulerDeps(projectId: string, rules: EvalRules) {
+export function createEvalSchedulerDeps(
+  projectId: string,
+  rules: EvalRules,
+  options?: { onTraceActivityFailure?: (error: unknown) => void },
+) {
   // The caller flushes this buffer before returning.
   const traceActivity: TraceSpanActivity[] = [];
   const traceTranscriptRules = prepareTraceDispatchRules(
@@ -50,6 +54,7 @@ export function createEvalSchedulerDeps(projectId: string, rules: EvalRules) {
         traceActivity.length = 0;
       } catch (error) {
         outcome = "error";
+        options?.onTraceActivityFailure?.(error);
         logger.warn("Failed to record trace rule selections", {
           projectId,
           error,

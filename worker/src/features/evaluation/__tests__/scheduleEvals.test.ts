@@ -267,11 +267,16 @@ describe("scheduleEvals", () => {
     const error = new Error("Redis unavailable");
     mocks.record.mockRejectedValueOnce(error);
     const warn = vi.spyOn(logger, "warn").mockImplementation(() => logger);
+    const onTraceActivityFailure = vi.fn();
     try {
-      const schedulerDeps = createEvalSchedulerDeps(projectId, {
-        observationRules: [],
-        traceTranscriptRules: [],
-      });
+      const schedulerDeps = createEvalSchedulerDeps(
+        projectId,
+        {
+          observationRules: [],
+          traceTranscriptRules: [],
+        },
+        { onTraceActivityFailure },
+      );
       schedulerDeps.collectTraceActivity({
         ...createTraceActivity("trace"),
         ruleIds: [facetRule.id],
@@ -279,6 +284,7 @@ describe("scheduleEvals", () => {
       });
 
       await expect(schedulerDeps.flushTraceActivity()).resolves.toBeUndefined();
+      expect(onTraceActivityFailure).toHaveBeenCalledExactlyOnceWith(error);
       expect(warn).toHaveBeenCalledExactlyOnceWith(
         "Failed to record trace rule selections",
         { projectId, error },

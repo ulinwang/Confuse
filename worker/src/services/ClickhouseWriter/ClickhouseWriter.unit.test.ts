@@ -147,6 +147,63 @@ describe("ClickhouseWriter", () => {
     expect(nativeWriter["queue"][TableName.EventsFull]).toHaveLength(0);
   });
 
+  it("uses the fixed isolated table and native-test telemetry", async () => {
+    const nativeTestWriter =
+      ClickhouseWriter.getNativeTestInstance(clickhouseClientMock);
+    const mockExec = vi.spyOn(clickhouseClientMock, "exec").mockResolvedValue({
+      stream: Readable.from([]),
+    });
+
+    nativeTestWriter.addToQueue(
+      TableName.EventsFull,
+      preparedEvent("native-test-1"),
+    );
+    await nativeTestWriter.flushAll(true);
+
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "INSERT INTO events_native_test FORMAT Native",
+        clickhouse_settings: expect.objectContaining({ log_queries: 0 }),
+      }),
+    );
+    expect(serverExports.recordIncrement).toHaveBeenCalledWith(
+      "langfuse.queue.clickhouse_writer.request",
+      1,
+      { format: "native-test" },
+    );
+    expect(logger.child).toHaveBeenCalledWith({ format: "native-test" });
+  });
+
+  it("keeps the isolated writer alive for the production flush callback", async () => {
+    const nativeTestWriter =
+      ClickhouseWriter.getNativeTestInstance(clickhouseClientMock);
+    const mockInsert = vi
+      .spyOn(clickhouseClientMock, "insert")
+      .mockResolvedValue();
+    const mockExec = vi.spyOn(clickhouseClientMock, "exec").mockResolvedValue({
+      stream: Readable.from([]),
+    });
+
+    writer.addToQueue(TableName.Traces, { id: "primary-1" } as any);
+    await ClickhouseWriter.shutdownAll(async () => {
+      expect(writer["intervalId"]).toBeNull();
+      expect(nativeTestWriter["intervalId"]).not.toBeNull();
+      nativeTestWriter.addToQueue(
+        TableName.EventsFull,
+        preparedEvent("native-after-production"),
+      );
+      await nativeTestWriter.flushAll(true);
+    });
+
+    expect(mockInsert).toHaveBeenCalledTimes(1);
+    expect(mockExec).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: "INSERT INTO events_native_test FORMAT Native",
+      }),
+    );
+    expect(nativeTestWriter["intervalId"]).toBeNull();
+  });
+
   it("keeps JSON and Native writers as separate singletons", () => {
     const nativeWriter =
       ClickhouseWriter.getNativeInstance(clickhouseClientMock);

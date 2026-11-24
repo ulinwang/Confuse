@@ -8,10 +8,7 @@ import {
 } from "@langfuse/shared/src/server";
 import { env } from "../../env";
 import { fetchEvalRules } from "../evaluation/fetchEvalRules";
-import {
-  createEvalSchedulerDeps,
-  scheduleEvals,
-} from "../evaluation/scheduleEvals";
+import { scheduleEvals } from "../evaluation/scheduleEvals";
 import {
   isTraceDispatchSampled,
   resolveTraceDispatchSamplingRate,
@@ -22,7 +19,9 @@ import {
   type OtelMediaPresence,
 } from "../otel-media/processOtelMedia";
 import type { IngestionService } from "../../services/IngestionService";
+import { otelShadowScope } from "./shadow/context";
 import { isEventsDispatchEnabled } from "../eventsDispatch/config";
+import { createOtelShadowEvalSchedulerDeps } from "./shadow/eval";
 
 type ProcessOtelEventsParams = {
   processor: OtelIngestionProcessor;
@@ -63,16 +62,19 @@ export async function processOtelEvents({
   }
 
   // Trace recording requires direct events-table writes.
-  const traceDispatchSamplingRate =
-    shouldWriteToEventsTable && isEventsDispatchEnabled()
-      ? await resolveTraceDispatchSamplingRate(projectId)
-      : 0;
+  let traceDispatchSamplingRate = 0;
+  if (shouldWriteToEventsTable && isEventsDispatchEnabled()) {
+    traceDispatchSamplingRate =
+      await resolveTraceDispatchSamplingRate(projectId);
+  }
   const includeTraceTranscriptRules = eventInputs.some(({ traceId }) =>
     isTraceDispatchSampled(traceId, traceDispatchSamplingRate),
   );
+  let schedulingInputsAvailable = true;
   const rules = await fetchEvalRules(projectId, {
     includeTraceTranscriptRules,
   }).catch((error) => {
+    schedulingInputsAvailable = false;
     traceException(error);
     logger.warn(`Failed to fetch eval rules for project ${projectId}`, error);
     return { observationRules: [], traceTranscriptRules: [] };
@@ -111,9 +113,13 @@ export async function processOtelEvents({
     });
   }
 
-  const schedulerDeps = needsScheduler
-    ? createEvalSchedulerDeps(projectId, rules)
-    : null;
+  const schedulerDeps = createOtelShadowEvalSchedulerDeps({
+    projectId,
+    rules,
+    traceDispatchSamplingRate,
+    schedulingInputsAvailable,
+    enabled: needsScheduler,
+  });
 
   await Promise.all(
     // Process each event independently
@@ -126,6 +132,7 @@ export async function processOtelEvents({
           fileKey,
         );
       } catch (error) {
+        otelShadowScope.getStore()?.fail("lookup");
         traceException(error);
         logger.error(
           `Failed to create event record for project ${eventInput.projectId} and observation ${eventInput.spanId}`,

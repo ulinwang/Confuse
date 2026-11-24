@@ -73,3 +73,32 @@ Raw ingress limits and byte-length telemetry remain pre-media measurements. Trac
 `LANGFUSE_OTEL_DIRECT_IMPLEMENTATION=rust` selects Rust for direct events-table writes in projects admitted by the early-media selector. It requires early extraction; media uploads remain optional. Unselected projects keep the original TypeScript path. Legacy writes remain in TypeScript in dual-write mode; events-only Rust jobs skip constructing the TypeScript span graph. The Rust path retains the native media registry through normalization and service calls.
 
 Native errors reject the job without falling back to TypeScript processing.
+
+## Comparing TypeScript and Rust ingestion
+
+With TypeScript as the direct writer, set `LANGFUSE_OTEL_NATIVE_SHADOW_SAMPLE_RATE` to compare a stable sample by project and source file. The default is `0` and works with only production tables. Rates of `0.001`, `0.01`, and `0.05` select approximately 0.1%, 1%, and 5% of batches. Raising the rate retains the earlier cohort.
+
+Before enabling sampling, provision `events_native_test` with the same schema, defaults and sorting key as `events_full`. On an unreplicated development database use `CREATE TABLE events_native_test AS events_full`. On replicated deployments give the test table its own replication path and retention policy. Keep production materialized views attached only to `events_full`.
+
+The worker keeps up to four accepted inputs totaling 64 MiB. After the primary writer acknowledges or drops its rows, the worker runs the production Rust processor on the same masked bytes. An empty result or an exception after input acceptance also triggers a comparison when the direct route is known. A masking rejection, capacity limit, or worker crash can leave a batch without a comparison. Production queue retries follow the TypeScript outcome.
+
+### Reading a comparison
+
+All metrics below use the prefix `langfuse.ingestion.otel.shadow.`.
+
+- Group `pair` by `comparison`, `primary_outcome`, and `shadow_outcome` to find one-sided failures. The stage tags distinguish preparation, processing and write failures. `operation_failure` also counts failures handled inside either processor. Rust can share a failed lookup across several spans. Use the inserted counts and row verification to see how many rows were affected.
+- `effect_difference` counts extra and missing requests by kind. Rust reuses the primary media and overflow upload results. Both sides run the evaluation scheduler with the same rules. A failed primary request still counts as attempted. Filter on `coverage:complete` to exclude comparisons affected by a failure or missing rules. Trace dispatch compares trace ID, span time and rule IDs. Each path uses its own byte estimate.
+- `row_verification` counts stored matches, changed values, map-order differences and ambiguous or missing rows. The verifier groups reads by 64 MiB of sampled input or roughly 30 seconds on quieter workers. It includes ClickHouse defaults and derived columns and skips the three write-time clocks. A detail query identifies changed columns for one example per mismatch type. Reports contain keys, counts and column names.
+- Compare `paired_processing_duration_ms` by implementation within successful, events-only batches with the same `primary_media_path`. A `processing_rust_to_ts_ratio` of 0.8 means Rust took 80% as long. `paired_writer_wait_duration_ms` measures buffered insert delays separately. TypeScript performs the real upload and scheduling I/O. Rust performs uncached read-only enrichment lookups. A dual-write primary also includes legacy work. These timings describe the sampled rollout workload.
+
+Use a reported key in an authorized ClickHouse session to locate the original file. Query the side that stored the row and omit the span predicate if the example has no span ID. Multiple deliveries can return several file paths.
+
+```sql
+SELECT DISTINCT blob_storage_file_path
+FROM events_full
+WHERE project_id = {projectId:String}
+  AND toStartOfMinute(start_time) = toStartOfMinute({startTime:DateTime64(6, 'UTC')})
+  AND xxHash32(trace_id) = {traceHash:UInt32}
+  AND span_id = {spanId:String}
+  AND start_time = {startTime:DateTime64(6, 'UTC')}
+```

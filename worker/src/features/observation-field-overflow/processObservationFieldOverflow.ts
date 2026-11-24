@@ -13,6 +13,7 @@ import {
 } from "@langfuse/shared";
 
 import { env } from "../../env";
+import { uploadOtelMedia } from "../otel-ingestion/shadow/media";
 
 const OBSERVATION_FIELD_OVERFLOW_UPLOAD_BATCH_SIZE = 3;
 
@@ -207,18 +208,35 @@ async function uploadOverflowCandidate(
   mediaBucket: string,
 ): Promise<OverflowResult> {
   const { field, value, originalBytes } = candidate;
-
-  const uploadResult = await uploadMediaForTrace({
-    projectId: eventRecord.project_id,
-    traceId: eventRecord.trace_id,
-    observationId: eventRecord.span_id,
-    field,
-    contentType: MediaContentType.TXT,
-    contentBytes: Buffer.from(value, "utf8"),
-    mediaBucket,
-    mediaPrefix: env.LANGFUSE_S3_MEDIA_UPLOAD_PREFIX,
-    origin: MediaAssociationOrigin.INGESTION_FIELD_OVERFLOW,
-  }).catch((error) => {
+  const contentBytes = Buffer.from(value, "utf8");
+  let uploadResult: {
+    mediaId: string;
+    outcome: "uploaded" | "reused";
+  } | null;
+  try {
+    uploadResult = await uploadOtelMedia({
+      projectId: eventRecord.project_id,
+      traceId: eventRecord.trace_id,
+      observationId: eventRecord.span_id,
+      field,
+      contentType: MediaContentType.TXT,
+      origin: MediaAssociationOrigin.INGESTION_FIELD_OVERFLOW,
+      loadBody: async () => contentBytes,
+      upload: (body, sha256Hash) =>
+        uploadMediaForTrace({
+          projectId: eventRecord.project_id,
+          traceId: eventRecord.trace_id,
+          observationId: eventRecord.span_id,
+          field,
+          contentType: MediaContentType.TXT,
+          contentBytes: body,
+          ...(sha256Hash ? { sha256Hash } : {}),
+          mediaBucket,
+          mediaPrefix: env.LANGFUSE_S3_MEDIA_UPLOAD_PREFIX,
+          origin: MediaAssociationOrigin.INGESTION_FIELD_OVERFLOW,
+        }),
+    });
+  } catch (error) {
     logger.warn(
       "Oversized observation field upload failed; persisting original field",
       {
@@ -241,9 +259,8 @@ async function uploadOverflowCandidate(
       0,
       metricTags,
     );
-
-    return null;
-  });
+    uploadResult = null;
+  }
   if (!uploadResult) {
     return {
       candidate,

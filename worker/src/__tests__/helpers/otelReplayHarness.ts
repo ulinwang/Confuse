@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { expect, vi } from "vitest";
 import type { Job } from "bullmq";
 
+import * as sharedServer from "@langfuse/shared/src/server";
 import {
   clickhouseClient,
   getS3EventStorageClient,
@@ -16,6 +17,7 @@ import {
 
 import { ClickhouseWriter, TableName } from "../../services/ClickhouseWriter";
 import { initializeEventByteAccounting } from "../../services/ClickhouseWriter/eventByteAccounting";
+import { shutdownOtelWriters } from "../../features/otel-ingestion/shadow/run";
 import { otelIngestionQueueProcessorBuilder } from "../../queues/otelIngestionQueue";
 import { ingestionQueueProcessorBuilder } from "../../queues/ingestionQueue";
 import {
@@ -28,6 +30,8 @@ type OtelReplayStoredRow = Record<string, unknown>;
 export type OtelReplayResult = {
   mode: OtelRawReplayMode;
   storedRows: OtelReplayStoredRow[];
+  shadowTableProvisioned: boolean;
+  shadowRows?: OtelReplayStoredRow[];
   legacyRows?: Partial<Record<LegacyReplayTable, OtelReplayStoredRow[]>>;
   evaluatedSpans: [string, string][];
   sideEffects?: unknown;
@@ -66,6 +70,12 @@ type RunOtelReplayParams = {
   writeMode?: "events_only" | "dual";
   sdkName?: string;
   sdkVersion?: string;
+  shadow?: {
+    sampleRate?: number;
+    failPrimaryInsert?: boolean;
+    failNativeInsert?: boolean;
+    maxAttempts?: number;
+  };
   captureSideEffects?: () => unknown;
 };
 
@@ -147,6 +157,23 @@ export function expectRawNativeParity(
   );
 }
 
+async function readOtelReplayRows(
+  client: ClickhouseClientType,
+  tableName: string,
+): Promise<OtelReplayStoredRow[]> {
+  const result = await client.query({
+    query: `
+      SELECT *
+      FROM ${tableName}
+      ORDER BY trace_id, span_id
+      SETTINGS asterisk_include_materialized_columns = 1,
+        asterisk_include_alias_columns = 1
+    `,
+    format: "JSONEachRow",
+  });
+  return (await result.json()) as OtelReplayStoredRow[];
+}
+
 /** Replay identical unparsed bytes through all production OTEL implementations. */
 export async function runOtelReplayComparison(
   params: RunOtelReplayParams,
@@ -194,6 +221,8 @@ export async function runOneOtelReplay(
     earlyMediaExtractionEnabled: params.mode !== "original-ts",
     directImplementation: params.mode === "early-rust" ? "rust" : "ts",
     writeMode,
+    shadowSampleRate: params.shadow?.sampleRate,
+    clickhouseMaxAttempts: params.shadow?.maxAttempts,
     v4NativeOtelBehaviour: "direct",
   });
 
@@ -212,6 +241,9 @@ export async function runOneOtelReplay(
   const isolatedTableNames = new Map<TableName, string>([
     [TableName.EventsFull, tableName],
   ]);
+  const shadowTableName = `${tableName}_native`;
+  const shadowEnabled =
+    params.mode !== "early-rust" && (params.shadow?.sampleRate ?? 0) > 0;
   if (writeMode === "dual") {
     for (const legacyTable of legacyReplayTables) {
       isolatedTableNames.set(legacyTable, `${tableName}_${legacyTable}`);
@@ -226,6 +258,10 @@ export async function runOneOtelReplay(
   let nativeWriter:
     | ReturnType<typeof ClickhouseWriter.getNativeInstance>
     | undefined;
+  let nativeTestWriter:
+    | ReturnType<typeof ClickhouseWriter.getNativeTestInstance>
+    | undefined;
+  let restoreVerifierQuery: (() => void) | undefined;
   let jsonEventsFullInsertCount = 0;
   let nativeInsert = false;
   let replayResult: OtelReplayResult | undefined;
@@ -240,6 +276,25 @@ export async function runOneOtelReplay(
         query: `CREATE TABLE ${isolatedTable} AS ${sourceTable} ENGINE = Memory`,
       });
       createdTables.push(isolatedTable);
+    }
+    if (shadowEnabled) {
+      await client.command({
+        query: `CREATE TABLE ${shadowTableName} AS ${TableName.EventsFull} ENGINE = Memory`,
+      });
+      createdTables.push(shadowTableName);
+
+      const queryClickhouse = sharedServer.queryClickhouse;
+      const verifierQuery = vi
+        .spyOn(sharedServer, "queryClickhouse")
+        .mockImplementation(
+          <T>(options: Parameters<typeof queryClickhouse>[0]) => {
+            const query = options.query
+              .replace(/\bevents_full\b/g, tableName)
+              .replace(/\bevents_native_test\b/g, shadowTableName);
+            return queryClickhouse<T>({ ...options, query });
+          },
+        );
+      restoreVerifierQuery = () => verifierQuery.mockRestore();
     }
 
     const insert = async (
@@ -263,11 +318,39 @@ export async function runOneOtelReplay(
         throw error;
       }
 
+      if (
+        params.shadow?.failPrimaryInsert &&
+        params.mode !== "early-rust" &&
+        insertParams.table === TableName.EventsFull
+      ) {
+        throw new Error("simulated primary JSON insert failure");
+      }
+
       return client.insert({ ...insertParams, table: isolatedTable });
     };
     const exec = async (
       execParams: Parameters<ClickhouseClientType["exec"]>[0],
     ) => {
+      if (execParams.query === "INSERT INTO events_native_test FORMAT Native") {
+        if (!shadowEnabled) {
+          throw new Error(
+            `OTEL replay unexpectedly used the shadow writer: ${execParams.query}`,
+          );
+        }
+        if (params.shadow?.failNativeInsert) {
+          throw new Error("simulated shadow native insert failure");
+        }
+        if (!("values" in execParams)) {
+          throw new Error(
+            "Shadow native OTEL replay insert has no values stream",
+          );
+        }
+        return client.exec({
+          ...execParams,
+          query: `INSERT INTO ${shadowTableName} FORMAT Native`,
+          values: execParams.values,
+        });
+      }
       if (params.mode !== "early-rust") {
         throw new Error(
           `${params.mode} replay unexpectedly used ClickHouse exec: ${execParams.query}`,
@@ -297,9 +380,12 @@ export async function runOneOtelReplay(
       },
     });
 
-    await ClickhouseWriter.shutdownAll();
+    await shutdownOtelWriters();
     writer = ClickhouseWriter.getInstance(testClient);
     nativeWriter = ClickhouseWriter.getNativeInstance(testClient);
+    if (shadowEnabled) {
+      nativeTestWriter = ClickhouseWriter.getNativeTestInstance(testClient);
+    }
 
     const processor = otelIngestionQueueProcessorBuilder(false);
     const job = {
@@ -368,7 +454,7 @@ export async function runOneOtelReplay(
       }
     }
 
-    await ClickhouseWriter.shutdownAll();
+    await shutdownOtelWriters();
     if (params.mode === "early-rust") {
       expect(nativeInsert).toBe(true);
       expect(jsonEventsFullInsertCount).toBe(0);
@@ -379,6 +465,7 @@ export async function runOneOtelReplay(
       for (const [format, candidate] of [
         ["JSONEachRow", writer],
         ["Native", nativeWriter],
+        ["NativeTest", nativeTestWriter],
       ] as const) {
         const pendingRows = candidate?.queue[table].length ?? 0;
         if (pendingRows > 0) {
@@ -389,16 +476,7 @@ export async function runOneOtelReplay(
       }
     }
 
-    const result = await client.query({
-      query: `
-        SELECT *
-        FROM ${tableName}
-        ORDER BY trace_id, span_id
-        SETTINGS asterisk_include_materialized_columns = 1,
-          asterisk_include_alias_columns = 1
-      `,
-      format: "JSONEachRow",
-    });
+    const storedRows = await readOtelReplayRows(client, tableName);
     const legacyRows =
       writeMode === "dual"
         ? Object.fromEntries(
@@ -419,7 +497,11 @@ export async function runOneOtelReplay(
 
     replayResult = {
       mode: params.mode,
-      storedRows: (await result.json()) as OtelReplayStoredRow[],
+      storedRows,
+      shadowTableProvisioned: shadowEnabled,
+      shadowRows: shadowEnabled
+        ? await readOtelReplayRows(client, shadowTableName)
+        : undefined,
       legacyRows,
       evaluatedSpans: otelReplayMocks.scheduleObservationEvals.mock.calls
         .slice(evaluationStart)
@@ -436,7 +518,6 @@ export async function runOneOtelReplay(
       { cause: error },
     );
   } finally {
-    restoreEnvironment();
     const replayJobAdds = await Promise.allSettled(pendingReplayJobAdds);
     for (const restoreQueueAddSpy of restoreQueueAddSpies) {
       restoreQueueAddSpy();
@@ -452,18 +533,20 @@ export async function runOneOtelReplay(
     for (const result of queueCleanupResults) {
       if (result.status === "rejected") cleanupErrors.push(result.reason);
     }
+
+    try {
+      await shutdownOtelWriters();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    restoreVerifierQuery?.();
+    restoreEnvironment();
     storageServiceSpy.mockRestore();
     vi.mocked(getS3EventStorageClient).mockReset();
     eventStorage.download.mockClear();
     eventStorage.downloadBytes.mockClear();
     eventStorage.uploaded.clear();
     eventStorage.source = undefined;
-
-    try {
-      await ClickhouseWriter.shutdownAll();
-    } catch (error) {
-      cleanupErrors.push(error);
-    }
     if (unmappedInsertError) {
       cleanupErrors.push(unmappedInsertError);
     }

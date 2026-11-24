@@ -5,6 +5,7 @@ import {
   createEvent,
   getS3EventStorageClient,
   markProjectIngestFailure,
+  otelMediaUploads,
   OtelIngestionProcessor,
   QueueJobs,
   recordDistribution,
@@ -426,6 +427,101 @@ describe("native Rust trace activity", () => {
       for (const upload of uploads) {
         upload.resolve({ mediaId: "cleanup", outcome: "uploaded" });
       }
+      Object.assign(env, original);
+      vi.mocked(uploadMediaForTrace).mockReset();
+      vi.clearAllMocks();
+    }
+  });
+
+  it("admits overflow bytes before loading the body", async () => {
+    const { processRustOtelEvents: processNative } = await vi.importActual<
+      typeof import("../../features/otel-ingestion/processRustOtelEvents")
+    >("../../features/otel-ingestion/processRustOtelEvents");
+    const original = {
+      LANGFUSE_EVENTS_DISPATCH_ENABLED: env.LANGFUSE_EVENTS_DISPATCH_ENABLED,
+      LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED:
+        env.LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED,
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET,
+    };
+    const reservedBytes = 1024;
+    const admission = Promise.withResolvers<void>();
+    const reserve = vi
+      .spyOn(otelMediaUploads, "run")
+      .mockImplementation(async (_bytes, work) => {
+        await admission.promise;
+        return work();
+      });
+
+    Object.assign(env, {
+      LANGFUSE_EVENTS_DISPATCH_ENABLED: "false",
+      LANGFUSE_OBSERVATION_FIELD_OVERFLOW_ENABLED: "true",
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: "media-bucket",
+    });
+    vi.mocked(fetchEvalRules).mockResolvedValue({
+      observationRules: [],
+      traceTranscriptRules: [],
+    });
+
+    const overflowBody = vi.fn(async () => Buffer.from("overflow-body"));
+    vi.mocked(uploadMediaForTrace).mockResolvedValue({
+      mediaId: "media-id",
+      outcome: "uploaded",
+    });
+    const processing = {
+      complete: vi.fn().mockResolvedValue({
+        finalized: undefined,
+        overflowRequests: [
+          {
+            index: 0,
+            eventIndex: 0,
+            traceId: "trace-id",
+            observationId: "observation-id",
+            field: "output",
+            metadataIndex: undefined,
+            byteLength: reservedBytes,
+            sha256Hash: "overflow-hash",
+          },
+        ],
+      }),
+      overflowBody,
+      finalize: vi.fn().mockResolvedValue({ events: [] }),
+      dispose: vi.fn().mockResolvedValue(undefined),
+    };
+
+    try {
+      const replay = processNative({
+        batch: {
+          process: vi.fn().mockResolvedValue({
+            batch: processing,
+            mediaRequests: [],
+            lookupRequests: [],
+            traceIds: [],
+          }),
+        } as never,
+        context: {
+          projectId: "project",
+          fileKey: "overflow-admission.json",
+          now: "2026-10-29T10:00:00.000Z",
+          isLangfuseInternal: false,
+          ingestionApiKey: "",
+          ingestionSdkName: "test",
+          ingestionSdkVersion: "test",
+        },
+      });
+
+      await vi.waitFor(() =>
+        expect(reserve).toHaveBeenCalledWith(
+          reservedBytes,
+          expect.any(Function),
+        ),
+      );
+      expect(overflowBody).not.toHaveBeenCalled();
+      admission.resolve();
+      await replay;
+      expect(overflowBody).toHaveBeenCalledOnce();
+    } finally {
+      admission.resolve();
+      reserve.mockRestore();
       Object.assign(env, original);
       vi.mocked(uploadMediaForTrace).mockReset();
       vi.clearAllMocks();

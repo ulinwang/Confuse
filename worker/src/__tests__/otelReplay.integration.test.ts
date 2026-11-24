@@ -23,6 +23,7 @@ import {
   type ResourceSpan,
   uploadMediaForTrace,
 } from "@langfuse/shared/src/server";
+import * as sharedServer from "@langfuse/shared/src/server";
 import { prisma } from "@langfuse/shared/src/db";
 import * as masking from "@langfuse/shared/src/server/ee/ingestionMasking";
 import * as otelPreparation from "../features/otel-ingestion/prepareOtelBatch";
@@ -265,6 +266,23 @@ function expectNativeEarlyPathParity(
 ): void {
   expect(comparableOtelReplayRows(comparison.earlyRust.storedRows)).toEqual(
     comparableOtelReplayRows(comparison.earlyTs.storedRows),
+  );
+}
+
+function useProductionModelLookup(): void {
+  otelReplayMocks.findModel.mockImplementation(
+    async ({ projectId, model }: { projectId: string; model: string }) => {
+      const matchedModel = await sharedServer.findModelInPostgres({
+        projectId,
+        model,
+      });
+      return {
+        model: matchedModel,
+        pricingTiers: matchedModel
+          ? await sharedServer.findPricingTiersForModel(matchedModel.id)
+          : [],
+      };
+    },
   );
 }
 
@@ -3206,6 +3224,230 @@ describe(
           preparation.mockRestore();
           await prisma.project.delete({ where: { id: projectId } });
           await prisma.organization.delete({ where: { id: orgId } });
+        }
+      },
+    );
+
+    it.each([
+      ["events_only", "original-ts"],
+      ["dual", "early-ts"],
+    ] as const)(
+      "runs the sampled native shadow after the primary receipt in %s/%s mode",
+      async (writeMode, mode) => {
+        useProductionModelLookup();
+        const createdProject =
+          writeMode === "dual" ? await createOrgProjectAndApiKey() : undefined;
+        const projectId =
+          createdProject?.projectId ?? `${PROJECT_ID}-shadow-${writeMode}`;
+        try {
+          const uploadStart =
+            otelReplayMocks.uploadMediaForTrace.mock.calls.length;
+          const evalStart =
+            otelReplayMocks.scheduleObservationEvals.mock.calls.length;
+          const result = await runOneOtelReplay({
+            mode,
+            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
+            projectId,
+            orgId: createdProject?.orgId,
+            fileKey: `${FILE_KEY}.shadow-${writeMode}`,
+            mediaUploadEnabled: true,
+            overflowEnabled: true,
+            overflowSizeLimitBytes: 256,
+            writeMode,
+            shadow: { sampleRate: 1 },
+          });
+
+          expect(result.shadowTableProvisioned).toBe(true);
+          expect(result.shadowRows).toBeDefined();
+          expect(comparableOtelReplayRows(result.shadowRows)).toEqual(
+            comparableOtelReplayRows(result.storedRows),
+          );
+          expect(
+            otelReplayMocks.uploadMediaForTrace.mock.calls.length - uploadStart,
+          ).toBe(writeMode === "dual" ? 4 : 2);
+          expect(
+            otelReplayMocks.scheduleObservationEvals.mock.calls.length -
+              evalStart,
+          ).toBe(4);
+          if (writeMode === "dual") {
+            expect(result.legacyRows?.observations).toHaveLength(2);
+          }
+
+          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
+            "langfuse.ingestion.otel.shadow.pair",
+            1,
+            expect.objectContaining({
+              primary_outcome: "inserted",
+              shadow_outcome: "inserted",
+              comparison: "match",
+            }),
+          ]);
+          const processing =
+            otelReplayMocks.recordDistribution.mock.calls.filter(
+              ([name]) =>
+                name ===
+                "langfuse.ingestion.otel.shadow.paired_processing_duration_ms",
+            );
+          expect(processing).toHaveLength(2);
+          expect(
+            processing
+              .map(
+                ([, , tags]) =>
+                  (tags as { implementation: string }).implementation,
+              )
+              .sort(),
+          ).toEqual(["rust", "ts"]);
+          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
+            "langfuse.ingestion.otel.shadow.row_verification",
+            2,
+            { outcome: "matched" },
+          ]);
+        } finally {
+          if (createdProject) {
+            await prisma.project.delete({
+              where: { id: createdProject.projectId },
+            });
+            await prisma.organization.delete({
+              where: { id: createdProject.orgId },
+            });
+          }
+        }
+      },
+    );
+
+    it("preserves a primary exception and completes the sampled native write", async () => {
+      const failure = new Error("synthetic TypeScript processing failure");
+      const primary = vi
+        .spyOn(sharedServer.OtelIngestionProcessor.prototype, "processToEvent")
+        .mockImplementationOnce(() => {
+          throw failure;
+        });
+      try {
+        await expect(
+          runOneOtelReplay({
+            mode: "original-ts",
+            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
+            projectId: PROJECT_ID,
+            fileKey: FILE_KEY,
+            shadow: { sampleRate: 1 },
+          }),
+        ).rejects.toMatchObject({ cause: failure });
+        expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
+          "langfuse.ingestion.otel.shadow.pair",
+          1,
+          expect.objectContaining({
+            comparison: "primary_only_failure",
+            primary_outcome: "exception",
+            shadow_outcome: "inserted",
+          }),
+        ]);
+      } finally {
+        primary.mockRestore();
+      }
+    });
+
+    it("does not provision or read a shadow table at zero sample rate", async () => {
+      const nativeTestWriter = vi.spyOn(
+        ClickhouseWriter,
+        "getNativeTestInstance",
+      );
+      try {
+        const result = await runOneOtelReplay({
+          mode: "original-ts",
+          bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
+          projectId: `${PROJECT_ID}-shadow-zero-rate`,
+          fileKey: `${FILE_KEY}.shadow-zero-rate`,
+        });
+
+        expect(result.storedRows).toHaveLength(2);
+        expect(result.shadowTableProvisioned).toBe(false);
+        expect(result.shadowRows).toBeUndefined();
+        expect(nativeTestWriter).not.toHaveBeenCalled();
+        expect(
+          otelReplayMocks.recordIncrement.mock.calls.some(
+            ([name]) => name === "langfuse.ingestion.otel.shadow.pair",
+          ),
+        ).toBe(false);
+      } finally {
+        nativeTestWriter.mockRestore();
+      }
+    });
+
+    it.each([
+      {
+        name: "primary-only",
+        shadow: { failPrimaryInsert: true },
+        primaryRows: 0,
+        shadowRows: 2,
+        primaryOutcome: "dropped",
+        shadowOutcome: "inserted",
+        primaryStage: "primary_writer",
+        shadowStage: "none",
+      },
+      {
+        name: "shadow-only",
+        shadow: { failNativeInsert: true },
+        primaryRows: 2,
+        shadowRows: 0,
+        primaryOutcome: "inserted",
+        shadowOutcome: "dropped",
+        primaryStage: "none",
+        shadowStage: "shadow_writer",
+      },
+    ] as const)(
+      "keeps the other side observable for a %s writer failure and reports safe diagnostics",
+      async ({
+        name,
+        shadow,
+        primaryRows,
+        shadowRows,
+        primaryOutcome,
+        shadowOutcome,
+        primaryStage,
+        shadowStage,
+      }) => {
+        const projectId = `${PROJECT_ID}-${name}-failure`;
+        const fileKey = `${FILE_KEY}.${name}-failure`;
+        const logInfo = vi.spyOn(sharedServer.logger, "info");
+        try {
+          const result = await runOneOtelReplay({
+            mode: "original-ts",
+            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
+            projectId,
+            fileKey,
+            shadow: { ...shadow, sampleRate: 1, maxAttempts: 1 },
+          });
+
+          expect(result.storedRows).toHaveLength(primaryRows);
+          expect(result.shadowRows).toHaveLength(shadowRows);
+          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
+            "langfuse.ingestion.otel.shadow.pair",
+            1,
+            expect.objectContaining({
+              primary_outcome: primaryOutcome,
+              shadow_outcome: shadowOutcome,
+            }),
+          ]);
+
+          const report = logInfo.mock.calls.find(
+            ([message]) =>
+              message === "OTEL shadow batch differs or is incomplete",
+          )?.[1] as Record<string, unknown> | undefined;
+          expect(report).toMatchObject({
+            projectId,
+            primaryInserted: primaryRows,
+            shadowInserted: shadowRows,
+            primary_error_stage: primaryStage,
+            shadow_error_stage: shadowStage,
+            coverage: "partial",
+            batchRowKeys: expect.any(Array),
+          });
+          const serializedReport = JSON.stringify(report);
+          expect(serializedReport).not.toContain(fileKey);
+          expect(serializedReport).not.toContain("short replay answer");
+          expect(serializedReport).not.toContain("plain input");
+        } finally {
+          logInfo.mockRestore();
         }
       },
     );

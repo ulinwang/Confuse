@@ -2,7 +2,9 @@ import {
   context,
   propagation,
   ROOT_CONTEXT,
+  trace,
   type Span,
+  type Tracer,
 } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -11,7 +13,14 @@ import {
   normalizeClickHouseQueryTags,
 } from "../clickhouse/queryTags";
 import { contextWithLangfuseProps } from "../headerPropagation";
-import { addUserToSpan, instrumentAsync, instrumentSync } from ".";
+import {
+  addUserToSpan,
+  getTracer,
+  instrumentAsync,
+  instrumentSync,
+  traceException,
+} from ".";
+import { withCustomerDataLoggingSuppressed } from "../loggingContext";
 
 describe("instrumentation baggage propagation", () => {
   // Baggage only propagates through context.with once a manager is registered.
@@ -174,5 +183,46 @@ describe("instrumentation baggage propagation", () => {
     expect(propagation.getBaggage(userContext!)?.getEntry("user.email")).toBe(
       undefined,
     );
+  });
+
+  it("redacts exception details while customer-data logging is suppressed", async () => {
+    const span = {
+      recordException: vi.fn(),
+      setAttributes: vi.fn(),
+      setStatus: vi.fn(),
+    } as unknown as Span;
+
+    await withCustomerDataLoggingSuppressed(async () => {
+      await Promise.resolve();
+      traceException(new Error("customer-controlled error"), span);
+    });
+
+    expect(span.recordException).toHaveBeenCalledWith({
+      code: "customer_data_suppressed",
+      message: "customer data suppressed",
+      name: "CustomerDataSuppressedError",
+      stack: undefined,
+    });
+    expect(span.setAttributes).toHaveBeenCalledWith({
+      "error.stack": undefined,
+      "error.message": "customer data suppressed",
+      "error.type": "CustomerDataSuppressedError",
+    });
+  });
+
+  it("does not consult the process tracer provider while suppressed", () => {
+    const processTracer = {} as Tracer;
+    const processGetTracer = vi
+      .spyOn(trace, "getTracer")
+      .mockReturnValue(processTracer);
+
+    try {
+      expect(
+        withCustomerDataLoggingSuppressed(() => getTracer("shadow")),
+      ).not.toBe(processTracer);
+      expect(processGetTracer).not.toHaveBeenCalled();
+    } finally {
+      processGetTracer.mockRestore();
+    }
   });
 });

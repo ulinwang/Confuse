@@ -52,6 +52,13 @@ import {
   parsePreparedOtelBatch,
   prepareOtelBatch,
 } from "../features/otel-ingestion/prepareOtelBatch";
+import { otelShadowScope } from "../features/otel-ingestion/shadow/context";
+import {
+  reserveSample,
+  sampleFile,
+  submitSample,
+  type PrimaryStage,
+} from "../features/otel-ingestion/shadow/run";
 import { processRustOtelEvents } from "../features/otel-ingestion/processRustOtelEvents";
 
 /**
@@ -543,6 +550,10 @@ export const otelIngestionQueueProcessorBuilder = (
     let mediaPath: "early" | "reference" | undefined;
     let mediaPresence: OtelMediaPresence | undefined;
     let inputByteLength: number | undefined;
+    let sample: ReturnType<typeof reserveSample>;
+    let directWrite = false;
+    let stage: PrimaryStage = "primary_parse";
+    let failure: PrimaryStage | undefined;
     let inputPreparationDurationMs: number | undefined;
     const span = getCurrentSpan();
     try {
@@ -615,15 +626,51 @@ export const otelIngestionQueueProcessorBuilder = (
       const eventStorage = getS3EventStorageClient(
         env.LANGFUSE_S3_EVENT_UPLOAD_BUCKET,
       );
+      const writesEvents = v4WritesToEventsTable(env);
       const retainNativeBatch =
         earlyMediaEnabled &&
         env.LANGFUSE_OTEL_DIRECT_IMPLEMENTATION === "rust" &&
-        v4WritesToEventsTable(env);
+        writesEvents;
       const writesToLegacyTables = v4WritesToLegacyTables(env);
       // Priority 0: deployment-level override.
       //   LANGFUSE_MIGRATION_V4_NATIVE_OTEL_BEHAVIOUR=direct forces every batch
       //   onto the direct events_full path regardless of SDK headers/scopes.
       const envForcesDirect = v4ForceDirectOtelWrite(env);
+      const headerBasedDirectWrite = checkHeaderBasedDirectWrite({
+        sdkName: job.data.payload.sdkName,
+        sdkVersion: job.data.payload.sdkVersion,
+        ingestionVersion: job.data.payload.ingestionVersion,
+      });
+      directWrite = writesEvents && (envForcesDirect || headerBasedDirectWrite);
+      const nativeContext = () => ({
+        projectId,
+        fileKey,
+        now: new Date().toISOString(),
+        isLangfuseInternal,
+        ...attribution,
+      });
+      const extractMedia =
+        env.LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED === "true" &&
+        Boolean(env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET);
+      const sampled =
+        env.LANGFUSE_OTEL_DIRECT_IMPLEMENTATION === "ts" &&
+        writesEvents &&
+        sampleFile(
+          env.LANGFUSE_OTEL_NATIVE_SHADOW_SAMPLE_RATE,
+          projectId,
+          fileKey,
+        );
+      const accept = sampled
+        ? (input: Uint8Array | string | (() => string)) => {
+            sample = reserveSample(input, {
+              context: nativeContext(),
+              extractMedia,
+              jobId: job.data.id,
+              mediaPath: earlyMediaEnabled ? "early" : "reference",
+              writeMode: writesToLegacyTables ? "dual" : "events_only",
+            });
+          }
+        : undefined;
       const needsTypeScriptSpans =
         !retainNativeBatch || writesToLegacyTables || !envForcesDirect;
       let parsedSpans: ResourceSpan[] | undefined;
@@ -642,9 +689,8 @@ export const otelIngestionQueueProcessorBuilder = (
           orgId: job.data.payload.authCheck.scope.orgId,
           propagatedHeaders: job.data.payload.propagatedHeaders,
           retainNativeBatch,
-          extractMedia:
-            env.LANGFUSE_OTEL_MEDIA_UPLOAD_ENABLED === "true" &&
-            Boolean(env.LANGFUSE_S3_MEDIA_UPLOAD_BUCKET),
+          extractMedia,
+          onAcceptedInput: accept,
         });
         if ("error" in prepared) {
           logger.warn("Dropping OTEL event due to masking failure", {
@@ -690,11 +736,13 @@ export const otelIngestionQueueProcessorBuilder = (
           },
         );
 
+        const maskingEnabled = isIngestionMaskingEnabled();
+        if (!maskingEnabled) accept?.(resourceSpans);
         // Parse spans from S3 download
         parsedSpans = JSON.parse(resourceSpans);
 
         // Apply ingestion masking if enabled (EE feature)
-        if (isIngestionMaskingEnabled()) {
+        if (maskingEnabled) {
           const maskingResult = await applyIngestionMasking({
             data: parsedSpans,
             projectId,
@@ -717,6 +765,7 @@ export const otelIngestionQueueProcessorBuilder = (
             return;
           }
           parsedSpans = maskingResult.data;
+          accept?.(() => JSON.stringify(maskingResult.data));
         }
         inputPreparationDurationMs = performance.now() - preparationStartedAt;
       }
@@ -732,6 +781,7 @@ export const otelIngestionQueueProcessorBuilder = (
       let traces: IngestionEventType[] = [];
       let observations: IngestionEventType[] = [];
 
+      stage = "primary_convert";
       if (parsedSpans) {
         ({ traces, observations } = await prepareTypeScriptOtelEvents({
           processor,
@@ -749,6 +799,7 @@ export const otelIngestionQueueProcessorBuilder = (
         );
       }
 
+      stage = "primary_process";
       // Ensure required infra config is present
       const availableRedis = redis;
       const availablePrisma = prisma;
@@ -780,11 +831,6 @@ export const otelIngestionQueueProcessorBuilder = (
       //
       // Priority 3 (last resort): the owning organization signed up past the
       //   Cloud direct-write cutoff. Non-Langfuse-SDK exports only (see below).
-      const headerBasedDirectWrite = checkHeaderBasedDirectWrite({
-        sdkName: job.data.payload.sdkName,
-        sdkVersion: job.data.payload.sdkVersion,
-        ingestionVersion: job.data.payload.ingestionVersion,
-      });
 
       // Evaluated whenever the higher-precedence header/env signals did not
       // already qualify, so the write_path label can attribute the decision
@@ -843,6 +889,8 @@ export const otelIngestionQueueProcessorBuilder = (
         langfuseSdkTraffic,
       });
 
+      directWrite = writesEvents && useDirectEventWrite;
+
       span?.setAttribute("langfuse.ingestion.otel.write_path", writePath);
       recordIncrement("langfuse.ingestion.otel.write_path", 1, {
         path: writePath,
@@ -866,8 +914,7 @@ export const otelIngestionQueueProcessorBuilder = (
         );
         recordIncrement("langfuse.ingestion.otel.skipped_legacy_writes", 1);
       } else {
-        const shouldForwardToEventsTable =
-          !useDirectEventWrite && v4WritesToEventsTable(env);
+        const shouldForwardToEventsTable = !useDirectEventWrite && writesEvents;
 
         if (shouldProcessLegacyMedia) {
           // Process the exact normalized representation written by the legacy
@@ -925,20 +972,10 @@ export const otelIngestionQueueProcessorBuilder = (
       }
 
       // Determine what processing is needed
-      const shouldWriteToEventsTable =
-        v4WritesToEventsTable(env) && useDirectEventWrite;
-      if (retainNativeBatch && earlyBatch && shouldWriteToEventsTable) {
+      if (retainNativeBatch && earlyBatch && directWrite) {
         const directMediaPresence = await processRustOtelEvents({
           batch: earlyBatch,
-          context: {
-            projectId,
-            fileKey,
-            now: new Date().toISOString(),
-            isLangfuseInternal,
-            ingestionApiKey: attribution.ingestionApiKey,
-            ingestionSdkName: attribution.ingestionSdkName,
-            ingestionSdkVersion: attribution.ingestionSdkVersion,
-          },
+          context: nativeContext(),
         });
         mediaPresence = combineOtelMediaPresence(
           mediaPresence,
@@ -950,17 +987,21 @@ export const otelIngestionQueueProcessorBuilder = (
             "OTEL resource spans missing for TypeScript processing",
           );
         }
-        const directMediaPresence = await processOtelEvents({
-          processor,
-          resourceSpans: parsedSpans,
-          ingestionService: getIngestionService(),
-          projectId,
-          fileKey,
-          shouldWriteToEventsTable,
-          earlyBatch,
-          mediaPath,
-          inputByteLength,
-        });
+        const directMediaPresence = await otelShadowScope.run(
+          directWrite ? sample?.primary : undefined,
+          processOtelEvents,
+          {
+            processor,
+            resourceSpans: parsedSpans,
+            ingestionService: getIngestionService(),
+            projectId,
+            fileKey,
+            shouldWriteToEventsTable: directWrite,
+            earlyBatch,
+            mediaPath,
+            inputByteLength,
+          },
+        );
         if (directMediaPresence) {
           mediaPresence = combineOtelMediaPresence(
             mediaPresence,
@@ -969,6 +1010,7 @@ export const otelIngestionQueueProcessorBuilder = (
         }
       }
     } catch (e) {
+      failure = stage;
       const fileKey = job.data.payload.data.fileKey;
       if (e instanceof ForbiddenError) {
         traceException(e);
@@ -992,7 +1034,15 @@ export const otelIngestionQueueProcessorBuilder = (
       });
       throw e;
     } finally {
-      await earlyBatch?.dispose();
+      let disposed = false;
+      try {
+        await earlyBatch?.dispose();
+        disposed = true;
+      } finally {
+        if (sample && directWrite)
+          submitSample(sample, disposed ? failure : "primary_dispose");
+        else sample?.release();
+      }
       setOtelInputPreparationSpanAttributes(span, {
         durationMs: inputPreparationDurationMs,
         mediaPath,

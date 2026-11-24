@@ -24,14 +24,17 @@ import {
   rewriteMediaValues,
   type MediaRegistry,
 } from "./mediaReferenceText";
+import { otelShadowScope } from "../otel-ingestion/shadow/context";
+import {
+  recordOtelMediaResult,
+  replayOtelMediaResult,
+  type ShadowMediaUploadResult,
+  uploadOtelMedia,
+} from "../otel-ingestion/shadow/media";
 
 const MEDIA_PAGE_SIZE = 4_096;
 
-export type CachedMediaUpload = {
-  mediaId: string;
-  outcome: "uploaded" | "reused";
-  byteLength: number;
-};
+export type CachedMediaUpload = ShadowMediaUploadResult;
 
 // Retain descriptor metadata and completed upload results for the batch's lifetime.
 // Decoded bodies and restored source strings stay local to each processing call.
@@ -114,6 +117,21 @@ export async function uploadExtractedMediaOnce(params: {
     sha256Hash,
     contentType,
   ].join("\u0000");
+
+  const identity = {
+    projectId,
+    traceId,
+    observationId,
+    field,
+    contentType,
+    origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
+    sha256Hash,
+  } as const;
+
+  if (otelShadowScope.getStore()?.side === "native") {
+    return replayOtelMediaResult(identity);
+  }
+
   const cache =
     mediaUploadCache.get(batch) ??
     new Map<string, Promise<CachedMediaUpload>>();
@@ -130,14 +148,14 @@ export async function uploadExtractedMediaOnce(params: {
       field,
       origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
     });
-    return { ...result, outcome: "reused" };
+    return recordOtelMediaResult(identity, { ...result, outcome: "reused" });
   }
 
-  const uploadPromise = otelMediaUploads.run(
-    params.byteLengthUpperBound,
-    async (): Promise<CachedMediaUpload> => {
-      const contentBytes = await loadBody();
-      return {
+  const uploadPromise = otelMediaUploads.run(params.byteLengthUpperBound, () =>
+    uploadOtelMedia({
+      ...identity,
+      loadBody,
+      upload: async (contentBytes, capturedHash) => ({
         ...(await uploadMediaForTrace({
           projectId,
           traceId,
@@ -145,14 +163,13 @@ export async function uploadExtractedMediaOnce(params: {
           field,
           contentType,
           contentBytes,
-          sha256Hash,
+          sha256Hash: capturedHash ?? sha256Hash,
           mediaBucket,
           mediaPrefix,
           origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
         })),
-        byteLength: contentBytes.length,
-      };
-    },
+      }),
+    }),
   );
   cache.set(key, uploadPromise);
   try {
@@ -300,6 +317,9 @@ export function recordExtractedMediaUpload(
   byteLength?: number,
   bytesRemoved = 0,
 ): void {
+  // Native shadow replays the primary result; it did not upload or remove any
+  // bytes, so do not publish synthetic production media telemetry.
+  if (otelShadowScope.getStore()?.side === "native") return;
   const tags = {
     outcome,
     media_kind: kind,
