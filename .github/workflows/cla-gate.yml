@@ -1,7 +1,7 @@
 # Require "CLA gate" instead of "license/cla" after deploying this workflow.
 name: CLA gate
-on: # zizmor: ignore[dangerous-triggers] Metadata-only API calls; never checks out or executes PR code.
-  pull_request_target:
+on: # Metadata-only API calls; never checks out or executes PR code.
+  pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
   status:

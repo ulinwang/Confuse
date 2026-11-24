@@ -32,6 +32,10 @@ function options(argv) {
 
 function buildImage(dockerfile, image, push) {
   return new Promise((resolve, reject) => {
+    const memoryArgs =
+      dockerfile === "web/Dockerfile"
+        ? ["--build-arg", "NODE_BUILD_OPTIONS=--max-old-space-size=3072"]
+        : [];
     const args = push
       ? [
           "buildx",
@@ -43,9 +47,10 @@ function buildImage(dockerfile, image, push) {
           "--tag",
           image,
           "--push",
+          ...memoryArgs,
           ".",
         ]
-      : ["build", "--file", dockerfile, "--tag", image, "."];
+      : ["build", "--file", dockerfile, "--tag", image, ...memoryArgs, "."];
     const child = spawn("docker", args, {
       cwd: repositoryRoot,
       env: process.env,
