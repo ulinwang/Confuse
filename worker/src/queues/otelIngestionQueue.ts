@@ -52,7 +52,7 @@ import {
   parsePreparedOtelBatch,
   prepareOtelBatch,
 } from "../features/otel-ingestion/prepareOtelBatch";
-import { otelShadowScope } from "../features/otel-ingestion/shadow/context";
+import { otelProcessingHooks } from "../features/otel-ingestion/processingHooks";
 import {
   reserveSample,
   sampleFile,
@@ -831,7 +831,6 @@ export const otelIngestionQueueProcessorBuilder = (
       //
       // Priority 3 (last resort): the owning organization signed up past the
       //   Cloud direct-write cutoff. Non-Langfuse-SDK exports only (see below).
-
       // Evaluated whenever the higher-precedence header/env signals did not
       // already qualify, so the write_path label can attribute the decision
       // exactly and `direct_org_cutoff` counts only the traffic that rule
@@ -889,7 +888,8 @@ export const otelIngestionQueueProcessorBuilder = (
         langfuseSdkTraffic,
       });
 
-      directWrite = writesEvents && useDirectEventWrite;
+      const shouldWriteToEventsTable = writesEvents && useDirectEventWrite;
+      directWrite = shouldWriteToEventsTable;
 
       span?.setAttribute("langfuse.ingestion.otel.write_path", writePath);
       recordIncrement("langfuse.ingestion.otel.write_path", 1, {
@@ -971,43 +971,39 @@ export const otelIngestionQueueProcessorBuilder = (
         ]);
       }
 
-      // Determine what processing is needed
-      if (retainNativeBatch && earlyBatch && directWrite) {
-        const directMediaPresence = await processRustOtelEvents({
-          batch: earlyBatch,
-          context: nativeContext(),
-        });
-        mediaPresence = combineOtelMediaPresence(
-          mediaPresence,
-          directMediaPresence,
-        );
-      } else {
+      const processDirectOtelBatch = async () => {
+        if (retainNativeBatch && earlyBatch && shouldWriteToEventsTable) {
+          return processRustOtelEvents({
+            batch: earlyBatch,
+            context: nativeContext(),
+          });
+        }
         if (!parsedSpans) {
           throw new Error(
             "OTEL resource spans missing for TypeScript processing",
           );
         }
-        const directMediaPresence = await otelShadowScope.run(
-          directWrite ? sample?.primary : undefined,
-          processOtelEvents,
-          {
-            processor,
-            resourceSpans: parsedSpans,
-            ingestionService: getIngestionService(),
-            projectId,
-            fileKey,
-            shouldWriteToEventsTable: directWrite,
-            earlyBatch,
-            mediaPath,
-            inputByteLength,
-          },
+        return processOtelEvents({
+          processor,
+          resourceSpans: parsedSpans,
+          ingestionService: getIngestionService(),
+          projectId,
+          fileKey,
+          shouldWriteToEventsTable,
+          earlyBatch,
+          mediaPath,
+          inputByteLength,
+        });
+      };
+      const directMediaPresence = await otelProcessingHooks.run(
+        directWrite ? sample?.primary : undefined,
+        processDirectOtelBatch,
+      );
+      if (directMediaPresence) {
+        mediaPresence = combineOtelMediaPresence(
+          mediaPresence,
+          directMediaPresence,
         );
-        if (directMediaPresence) {
-          mediaPresence = combineOtelMediaPresence(
-            mediaPresence,
-            directMediaPresence,
-          );
-        }
       }
     } catch (e) {
       failure = stage;

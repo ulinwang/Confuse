@@ -1,19 +1,9 @@
-import { beforeEach, expect, it, vi } from "vitest";
+import { expect, it, vi } from "vitest";
+
 import type { EvalRules } from "../../evaluation/fetchEvalRules";
 import type { EvalSchedulerDeps } from "../../evaluation/scheduleEvals";
-import { effectDifferences, otelShadowScope, ShadowScope } from "./context";
-import {
-  createOtelShadowEvalSchedulerDeps,
-  getOtelShadowScheduling,
-} from "./eval";
-
-const mocks = vi.hoisted(() => ({
-  createEvalSchedulerDeps: vi.fn(),
-}));
-
-vi.mock("../../evaluation/scheduleEvals", () => ({
-  createEvalSchedulerDeps: mocks.createEvalSchedulerDeps,
-}));
+import { effectDifferences, ShadowScope } from "./context";
+import { schedulingHooks } from "./eval";
 
 type UpsertRequest = Parameters<EvalSchedulerDeps["upsertJobExecution"]>[0];
 type BlobRequest = Parameters<EvalSchedulerDeps["uploadObservationToS3"]>[0];
@@ -24,7 +14,7 @@ const rules: EvalRules = {
   traceTranscriptRules: [],
 };
 
-function createProductionDeps(): EvalSchedulerDeps {
+function productionDeps(): EvalSchedulerDeps {
   return {
     upsertJobExecution: vi.fn(async ({ id }: UpsertRequest) => ({ id })),
     uploadObservationToS3: vi.fn(async (_request: BlobRequest) => "s3/path"),
@@ -35,34 +25,27 @@ function createProductionDeps(): EvalSchedulerDeps {
   };
 }
 
-it("isolates native I/O while comparing repeated and failed intents", async () => {
-  const productionDeps = createProductionDeps();
-  productionDeps.enqueueEvalJob = vi
+it("captures equal intents, repeated requests, and primary failures independently", async () => {
+  const production = productionDeps();
+  production.enqueueEvalJob = vi
     .fn<EvalSchedulerDeps["enqueueEvalJob"]>()
     .mockRejectedValueOnce(new Error("queue unavailable"))
     .mockResolvedValue(undefined);
-  mocks.createEvalSchedulerDeps.mockReturnValue(productionDeps);
   const sample = {};
   const primary = new ShadowScope("primary", sample);
   const native = new ShadowScope("native", sample);
-  const primaryDeps = otelShadowScope.run(primary, () =>
-    createOtelShadowEvalSchedulerDeps({
-      projectId: "project",
-      rules,
-      traceDispatchSamplingRate: 0.5,
-      hasSchedulingRows: true,
-      enabled: true,
-    }),
-  );
-  const nativeDeps = otelShadowScope.run(native, () =>
-    createOtelShadowEvalSchedulerDeps({
-      projectId: "project",
-      rules,
-      traceDispatchSamplingRate: 0.5,
-      hasSchedulingRows: true,
-      enabled: true,
-    }),
-  );
+  const primaryDeps = schedulingHooks(primary).scheduler!({
+    enabled: true,
+    hasRows: false,
+    defaultCreate: () => production,
+  });
+  const nativeDeps = schedulingHooks(native).scheduler!({
+    enabled: true,
+    hasRows: false,
+    defaultCreate: () => {
+      throw new Error("native must not create production deps");
+    },
+  });
   if (!primaryDeps || !nativeDeps) throw new Error("scheduler deps missing");
 
   const upsert: UpsertRequest = {
@@ -99,16 +82,12 @@ it("isolates native I/O while comparing repeated and failed intents", async () =
     "queue unavailable",
   );
   await primaryDeps.enqueueEvalJob(enqueue);
-  await nativeDeps.enqueueEvalJob({
-    ...enqueue,
-    observationS3Path: "native/path",
-  });
-  await nativeDeps.enqueueEvalJob({
-    ...enqueue,
-    observationS3Path: "native/path",
-  });
+  await expect(nativeDeps.enqueueEvalJob(enqueue)).rejects.toThrow(
+    "No successful primary result for this operation",
+  );
+  await nativeDeps.enqueueEvalJob(enqueue);
 
-  // Only requested trace fields compare; serializedEventBytes is pipeline-specific.
+  // Activity matching excludes pipeline-specific serialized byte estimates.
   primaryDeps.collectTraceActivity({
     traceId: "trace",
     spanStartTimeISO: "2026-11-24T12:00:00.000Z",
@@ -124,33 +103,39 @@ it("isolates native I/O while comparing repeated and failed intents", async () =
   await primaryDeps.flushTraceActivity();
   await nativeDeps.flushTraceActivity();
 
-  expect(effectDifferences(primary, native)).toEqual([]);
-  expect([...primary.effects.get("eval-enqueue")!.values()]).toEqual([2]);
+  expect(effectDifferences(primary)).toEqual([]);
   expect(primary.failures).toEqual({ "eval-enqueue": 1 });
-  expect(productionDeps.upsertJobExecution).toHaveBeenCalledTimes(1);
-  expect(productionDeps.uploadObservationToS3).toHaveBeenCalledTimes(1);
-  expect(productionDeps.enqueueEvalJob).toHaveBeenCalledTimes(2);
-  expect(productionDeps.collectTraceActivity).toHaveBeenCalledTimes(1);
-  expect(productionDeps.flushTraceActivity).toHaveBeenCalledTimes(1);
-  expect(native.failures).toEqual({});
+  expect(production.upsertJobExecution).toHaveBeenCalledTimes(1);
+  expect(production.uploadObservationToS3).toHaveBeenCalledTimes(1);
+  expect(production.enqueueEvalJob).toHaveBeenCalledTimes(2);
+  expect(production.collectTraceActivity).toHaveBeenCalledTimes(1);
+  expect(production.flushTraceActivity).toHaveBeenCalledTimes(1);
+  expect(native.failures).toEqual({ "eval-enqueue": 1 });
 });
 
-it("keeps an empty native batch inert when primary inputs are absent", () => {
+it("keeps empty native scheduling inert and reports missing primary inputs only for rows", async () => {
   const native = new ShadowScope("native", {});
-  expect(otelShadowScope.run(native, getOtelShadowScheduling)).toEqual({
-    rules,
-    traceDispatchSamplingRate: 0,
-  });
-  otelShadowScope.run(native, () =>
-    createOtelShadowEvalSchedulerDeps({
-      projectId: "project",
-      rules,
-      hasSchedulingRows: false,
-      enabled: false,
-    }),
-  );
-  expect(native.failures).toEqual({});
-  expect(mocks.createEvalSchedulerDeps).not.toHaveBeenCalled();
-});
+  const hooks = schedulingHooks(native);
+  const create = vi.fn(() => productionDeps());
 
-beforeEach(() => mocks.createEvalSchedulerDeps.mockReset());
+  await expect(hooks.samplingRate!("project")).resolves.toBe(0);
+  await expect(
+    hooks.fetchRules!("project", { includeTraceTranscriptRules: false }),
+  ).resolves.toEqual(rules);
+  expect(
+    hooks.scheduler!({
+      enabled: false,
+      hasRows: false,
+      defaultCreate: create,
+    }),
+  ).toBeNull();
+  expect(create).not.toHaveBeenCalled();
+  expect(native.failures).toEqual({});
+
+  hooks.scheduler!({
+    enabled: false,
+    hasRows: true,
+    defaultCreate: create,
+  });
+  expect(native.failures).toEqual({ scheduling_inputs_unavailable: 1 });
+});

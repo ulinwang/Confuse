@@ -147,63 +147,6 @@ describe("ClickhouseWriter", () => {
     expect(nativeWriter["queue"][TableName.EventsFull]).toHaveLength(0);
   });
 
-  it("uses the fixed isolated table and native-test telemetry", async () => {
-    const nativeTestWriter =
-      ClickhouseWriter.getNativeTestInstance(clickhouseClientMock);
-    const mockExec = vi.spyOn(clickhouseClientMock, "exec").mockResolvedValue({
-      stream: Readable.from([]),
-    });
-
-    nativeTestWriter.addToQueue(
-      TableName.EventsFull,
-      preparedEvent("native-test-1"),
-    );
-    await nativeTestWriter.flushAll(true);
-
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.objectContaining({
-        query: "INSERT INTO events_native_test FORMAT Native",
-        clickhouse_settings: expect.objectContaining({ log_queries: 0 }),
-      }),
-    );
-    expect(serverExports.recordIncrement).toHaveBeenCalledWith(
-      "langfuse.queue.clickhouse_writer.request",
-      1,
-      { format: "native-test" },
-    );
-    expect(logger.child).toHaveBeenCalledWith({ format: "native-test" });
-  });
-
-  it("keeps the isolated writer alive for the production flush callback", async () => {
-    const nativeTestWriter =
-      ClickhouseWriter.getNativeTestInstance(clickhouseClientMock);
-    const mockInsert = vi
-      .spyOn(clickhouseClientMock, "insert")
-      .mockResolvedValue();
-    const mockExec = vi.spyOn(clickhouseClientMock, "exec").mockResolvedValue({
-      stream: Readable.from([]),
-    });
-
-    writer.addToQueue(TableName.Traces, { id: "primary-1" } as any);
-    await ClickhouseWriter.shutdownAll(async () => {
-      expect(writer["intervalId"]).toBeNull();
-      expect(nativeTestWriter["intervalId"]).not.toBeNull();
-      nativeTestWriter.addToQueue(
-        TableName.EventsFull,
-        preparedEvent("native-after-production"),
-      );
-      await nativeTestWriter.flushAll(true);
-    });
-
-    expect(mockInsert).toHaveBeenCalledTimes(1);
-    expect(mockExec).toHaveBeenCalledWith(
-      expect.objectContaining({
-        query: "INSERT INTO events_native_test FORMAT Native",
-      }),
-    );
-    expect(nativeTestWriter["intervalId"]).toBeNull();
-  });
-
   it("keeps JSON and Native writers as separate singletons", () => {
     const nativeWriter =
       ClickhouseWriter.getNativeInstance(clickhouseClientMock);
@@ -347,9 +290,15 @@ describe("ClickhouseWriter", () => {
       .mockResolvedValueOnce()
       .mockResolvedValueOnce();
 
-    const callbackFor = (id: string) => ({
+    const callbackFor = (id: string, failure?: "throw" | "reject") => ({
       onTerminal: (outcome: { status: string; row: unknown }) => {
         terminal.push({ id, ...outcome });
+        if (failure === "throw") {
+          throw new Error(`${id} callback failed`);
+        }
+        if (failure === "reject") {
+          return Promise.reject(new Error(`${id} callback rejected`));
+        }
       },
     });
 
@@ -358,7 +307,11 @@ describe("ClickhouseWriter", () => {
       first as any,
       callbackFor(first.id),
     );
-    writer.addToQueue(TableName.EventsFull, second as any);
+    writer.addToQueue(
+      TableName.EventsFull,
+      second as any,
+      callbackFor(second.id, "throw"),
+    );
 
     await vi.waitFor(() => expect(mockInsert).toHaveBeenCalledTimes(1));
     expect(terminal).toEqual([]);
@@ -369,14 +322,22 @@ describe("ClickhouseWriter", () => {
     writer.addToQueue(
       TableName.EventsFull,
       third as any,
-      callbackFor(third.id),
+      callbackFor(third.id, "reject"),
     );
     await writer.flushAll(true);
 
     expect(mockInsert).toHaveBeenCalledTimes(3);
-    expect(terminal.map(({ id, status }) => ({ id, status }))).toEqual([
-      { id: "event-1", status: "inserted" },
-      { id: "event-3", status: "inserted" },
+    expect(terminal).toHaveLength(3);
+    expect(
+      terminal.map(({ id, status, row }) => ({
+        id,
+        status,
+        rowId: (row as { id: string }).id,
+      })),
+    ).toEqual([
+      { id: "event-1", status: "inserted", rowId: "event-1" },
+      { id: "event-2", status: "inserted", rowId: "event-2" },
+      { id: "event-3", status: "inserted", rowId: "event-3" },
     ]);
     expect(terminal.map(({ row }) => row)).toEqual(
       expect.arrayContaining([
@@ -394,6 +355,17 @@ describe("ClickhouseWriter", () => {
         }),
       ]),
     );
+
+    await vi.waitFor(() => {
+      expect(
+        vi
+          .mocked(logger.error)
+          .mock.calls.filter(
+            ([message]) =>
+              message === "ClickhouseWriter terminal row callback failed",
+          ),
+      ).toHaveLength(2);
+    });
   });
 
   it("settles final drops and teardown callbacks without retaining sampled rows", async () => {
@@ -1448,8 +1420,13 @@ describe("ClickhouseWriter", () => {
         name: `test${i}`,
       }));
 
+      const settled: [string, string][] = [];
       records.forEach((record) => {
-        writer.addToQueue(TableName.Traces, record as any);
+        writer.addToQueue(TableName.Traces, record as any, {
+          onTerminal: ({ row, status }) => {
+            settled.push([row.id, status]);
+          },
+        });
       });
 
       await vi.advanceTimersByTimeAsync(writer.writeInterval);
@@ -1469,10 +1446,17 @@ describe("ClickhouseWriter", () => {
       expect(writer["queue"][TableName.Traces][0].data.id).toBe("2");
       expect(writer["queue"][TableName.Traces][1].data.id).toBe("3");
 
+      await vi.advanceTimersByTimeAsync(100);
+      expect(settled).toEqual([
+        ["0", "inserted"],
+        ["1", "inserted"],
+      ]);
+
       // Advance timer again to process the requeued items
       await vi.advanceTimersByTimeAsync(writer.writeInterval);
 
       expect(writer["queue"][TableName.Traces]).toHaveLength(0);
+      expect(settled).toEqual(records.map(({ id }) => [id, "inserted"]));
     });
   });
 });

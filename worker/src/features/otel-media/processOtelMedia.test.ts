@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   validateOtelJson,
@@ -43,9 +42,9 @@ import { MediaAssociationOrigin } from "@langfuse/shared";
 import type { IngestionEventType } from "@langfuse/shared/src/server";
 import {
   effectDifferences,
-  otelShadowScope,
   ShadowScope,
 } from "../otel-ingestion/shadow/context";
+import { otelProcessingHooks } from "../otel-ingestion/processingHooks";
 import {
   createDirectOtelMediaTargets,
   createLegacyOtelMediaTargets,
@@ -225,20 +224,43 @@ describe("processOtelEventMedia", () => {
       input: { role: "user" },
       name: "observation-name",
     };
-    const processMedia = vi.fn().mockResolvedValue(processResult);
-
-    const mediaPresence = await processOtelEventMedia({
-      targets: createDirectOtelMediaTargets([
-        eventInput,
-        { traceId: "trace-id", spanId: "without-media-fields" },
-        { traceId: "trace-id", input: "missing-span-id" },
-        null,
-      ]),
-      writePath: "direct",
-      ...MEDIA_DESTINATION,
-      fileKey: "file-key",
-      processMedia,
+    const uploadRequest = {
+      projectId: "project-id",
+      traceId: "trace-id",
+      observationId: "observation-id",
+      field: "input" as const,
+      contentType: "image/png" as const,
+      contentBytes: Buffer.from("media"),
+      mediaBucket: "media-bucket",
+      mediaPrefix: "media/",
+    };
+    const hookedResult = {
+      mediaId: "hooked-media",
+      outcome: "reused" as const,
+      byteLength: uploadRequest.contentBytes.length,
+    };
+    const uploadHook = vi.fn().mockResolvedValue(hookedResult);
+    const processMedia = vi.fn(async ({ uploadMedia }) => {
+      expect(await uploadMedia(uploadRequest)).toEqual(hookedResult);
+      return processResult;
     });
+
+    const mediaPresence = await otelProcessingHooks.run(
+      { media: { upload: uploadHook } },
+      () =>
+        processOtelEventMedia({
+          targets: createDirectOtelMediaTargets([
+            eventInput,
+            { traceId: "trace-id", spanId: "without-media-fields" },
+            { traceId: "trace-id", input: "missing-span-id" },
+            null,
+          ]),
+          writePath: "direct",
+          ...MEDIA_DESTINATION,
+          fileKey: "file-key",
+          processMedia,
+        }),
+    );
 
     expect(mediaPresence).toBe("present");
     expect(processMedia).toHaveBeenCalledWith(
@@ -254,17 +276,10 @@ describe("processOtelEventMedia", () => {
         mediaPath: "reference",
       }),
     );
+    expect(uploadHook).toHaveBeenCalledOnce();
+    expect(mocks.uploadMediaForTrace).not.toHaveBeenCalled();
     const uploadMedia = processMedia.mock.calls[0]?.[0].uploadMedia;
-    await uploadMedia({
-      projectId: "project-id",
-      traceId: "trace-id",
-      observationId: "observation-id",
-      field: "input",
-      contentType: "image/png",
-      contentBytes: Buffer.from("media"),
-      mediaBucket: "media-bucket",
-      mediaPrefix: "media/",
-    });
+    await uploadMedia(uploadRequest);
     expect(mocks.uploadMediaForTrace).toHaveBeenCalledWith(
       expect.objectContaining({
         origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
@@ -321,45 +336,6 @@ describe("processOtelEventMedia", () => {
     expect(mediaPresence).toBe("absent");
     expect(processMedia).not.toHaveBeenCalled();
     expect(mocks.instrumentAsync).not.toHaveBeenCalled();
-  });
-
-  it("captures inline media identity without retaining its body", async () => {
-    const contentBytes = Buffer.from("inline media body");
-    const primary = new ShadowScope("primary", {});
-    const processMedia = vi.fn(async ({ uploadMedia }) => {
-      await uploadMedia({
-        projectId: "project-id",
-        traceId: "trace-id",
-        observationId: "observation-id",
-        field: "input",
-        contentType: "image/png",
-        contentBytes,
-        mediaBucket: "media-bucket",
-        mediaPrefix: "media/",
-      });
-      return processResult;
-    });
-
-    await otelShadowScope.run(primary, () =>
-      processOtelEventMedia({
-        targets: createDirectOtelMediaTargets([
-          { traceId: "trace-id", spanId: "observation-id", input: "media" },
-        ]),
-        writePath: "direct",
-        ...MEDIA_DESTINATION,
-        fileKey: "file-key",
-        processMedia,
-      }),
-    );
-
-    expect(mocks.uploadMediaForTrace).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sha256Hash: createHash("sha256").update(contentBytes).digest("base64"),
-      }),
-    );
-    expect(JSON.stringify([...primary.effects])).not.toContain(
-      contentBytes.toString(),
-    );
   });
 
   it("fails open when media processing throws", async () => {
@@ -743,7 +719,7 @@ describe("processOtelEventMedia", () => {
     const primary = new ShadowScope("primary", sample);
     const native = new ShadowScope("native", sample);
 
-    const primaryResult = await otelShadowScope.run(primary, () =>
+    const primaryResult = await otelProcessingHooks.run(primary, () =>
       resolveTarget(batch, primaryRecord),
     );
     const primaryMediaMetricCalls = mocks.recordIncrement.mock.calls.filter(
@@ -755,7 +731,7 @@ describe("processOtelEventMedia", () => {
           name === "langfuse.ingestion.otel.media.byte_length" ||
           name === "langfuse.ingestion.otel.media.bytes_removed",
       ).length;
-    const nativeResult = await otelShadowScope.run(native, () =>
+    const nativeResult = await otelProcessingHooks.run(native, () =>
       resolveTarget(batch, nativeRecord),
     );
 
@@ -780,7 +756,7 @@ describe("processOtelEventMedia", () => {
           name === "langfuse.ingestion.otel.media.bytes_removed",
       ),
     ).toHaveLength(primaryMediaByteMetricCalls);
-    expect(effectDifferences(primary, native)).toEqual([]);
+    expect(effectDifferences(primary)).toEqual([]);
   });
 
   it.each([4, 2 * 1024 * 1024])(

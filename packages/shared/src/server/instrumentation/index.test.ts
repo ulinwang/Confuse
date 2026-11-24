@@ -218,7 +218,7 @@ describe("instrumentation baggage propagation", () => {
 
     try {
       expect(
-        withCustomerDataLoggingSuppressed(() => getTracer("shadow")),
+        withCustomerDataLoggingSuppressed(() => getTracer("test")),
       ).not.toBe(processTracer);
       expect(processGetTracer).not.toHaveBeenCalled();
     } finally {

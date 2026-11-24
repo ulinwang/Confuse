@@ -87,22 +87,34 @@ impl IntoPrepared<BTreeMap<String, u64>> for BTreeMap<String, Value> {
 
 impl IntoPrepared<BTreeMap<String, Decimal64>> for BTreeMap<String, Value> {
     fn into_prepared(self) -> Result<BTreeMap<String, Decimal64>, String> {
-        let entries = self.len();
-        let prepared: BTreeMap<_, _> = self
+        let mut invalid_entries = 0;
+        let mut first_error = None;
+        let prepared = self
             .into_iter()
             .filter_map(|(key, value)| {
                 let text = match value {
                     Value::Number(number) => number.to_string(),
                     Value::String(value) => value,
-                    _ => return None,
+                    _ => {
+                        invalid_entries += 1;
+                        first_error.get_or_insert(format!("{key}: expected a numeric cost"));
+                        return None;
+                    }
                 };
-                let value = parse_decimal(&text, &key).ok()?;
-                Some((key, Decimal64(value)))
+                match parse_decimal(&text, &key) {
+                    Ok(value) => Some((key, Decimal64(value))),
+                    Err(error) => {
+                        invalid_entries += 1;
+                        first_error.get_or_insert(error);
+                        None
+                    }
+                }
             })
             .collect();
-        if prepared.len() < entries {
+        if let Some(first_error) = first_error {
             tracing::warn!(
-                invalid_entries = entries - prepared.len(),
+                invalid_entries,
+                first_error = %first_error,
                 "omitted invalid cost entries while preparing a ClickHouse row"
             );
         }

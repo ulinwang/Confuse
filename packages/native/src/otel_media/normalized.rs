@@ -337,10 +337,7 @@ where
 fn report_extraction_error(error: &EarlyMediaError) {
     metrics::counter!("langfuse.native.otel_media.extraction_errors", "stage" => "normalized")
         .increment(1);
-    tracing::warn!(
-        code = error.code(),
-        "media extraction failed; retaining original field text"
-    );
+    tracing::warn!(%error, "media extraction failed; retaining original field text");
 }
 
 fn provider_encoding(value: &str) -> (MediaEncoding, bool) {

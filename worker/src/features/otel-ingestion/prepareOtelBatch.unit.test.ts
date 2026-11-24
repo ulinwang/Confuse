@@ -124,7 +124,7 @@ describe("prepareOtelBatch native input boundary", { retry: 0 }, () => {
     },
   );
 
-  it("excludes a rejected masking response from shadow processing", async () => {
+  it("calls the accepted-input observer only after masking succeeds", async () => {
     maskingMocks.applyIngestionMasking.mockResolvedValue({
       success: false,
       error: "denied",

@@ -70,8 +70,8 @@ import {
 } from "./aiGatewayAttribution";
 import { randomUUID } from "crypto";
 import { SpanKind } from "@opentelemetry/api";
+import { otelProcessingHooks } from "../../features/otel-ingestion/processingHooks";
 import { ClickhouseReadSkipCache } from "../../utils/clickhouseReadSkipCache";
-import { otelShadowScope } from "../../features/otel-ingestion/shadow/context";
 import { applyObservationFieldOverflow } from "../../features/observation-field-overflow/processObservationFieldOverflow";
 
 /**
@@ -501,9 +501,9 @@ export class IngestionService {
             "utf8",
           ),
         };
-    const shadow = otelShadowScope.getStore();
-    if (shadow) {
-      shadow.track(
+    const observe = otelProcessingHooks.getStore()?.observeWrite;
+    if (observe) {
+      observe(
         {
           traceId: recordToInsert.trace_id,
           spanId: recordToInsert.span_id,

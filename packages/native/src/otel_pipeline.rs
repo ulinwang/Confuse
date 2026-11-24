@@ -23,6 +23,7 @@ use crate::native_task::{to_js_error, NativeResult, OwnedTask};
 use crate::otel::{process_to_events, EventBuildConfig, OwnedEvent, StorageContext};
 use crate::otel_input::{EarlyOtelBatch, ExtractedBatch};
 use crate::otel_media::ExtractedMedia;
+use crate::telemetry::with_quiet_logging;
 use crate::PreparedEvent;
 
 mod lookups;
@@ -38,6 +39,7 @@ pub struct OtelProcessingContext {
     pub file_key: String,
     pub now: String,
     pub is_langfuse_internal: bool,
+    pub suppress_logging: Option<bool>,
 }
 impl OtelProcessingContext {
     fn into_configs(self) -> (EventBuildConfig, StorageContext) {
@@ -175,6 +177,7 @@ impl Pipeline {
 pub struct RustOtelBatch {
     state: Arc<Mutex<Option<Pipeline>>>,
     evaluation_rows: Arc<Mutex<EvaluationRows>>,
+    suppress_logging: bool,
 }
 
 #[napi(object)]
@@ -321,25 +324,29 @@ impl EarlyOtelBatch {
     ) -> napi::Result<AsyncTask<OwnedTask<PreparedOtelBatch>>> {
         let pipeline_memory = Arc::new(NativeMemory::new(&env, 0)?);
         let source = self.take_data().map_err(|error| to_js_error(env, error))?;
+        let suppress_logging = context.suppress_logging.unwrap_or(false);
         Ok(AsyncTask::new(OwnedTask::new(move || {
-            let (build_config, storage_context) = context.into_configs();
-            let mut events = parse_events(&source, &build_config)?;
-            media::restore_lookup_fields(&mut events, &source.media)?;
-            let trace_ids = unique_trace_ids(&events);
-            let mut pipeline = Pipeline::new(source, events, storage_context, pipeline_memory);
-            let media_requests = media::collect_media_requests(&mut pipeline)?;
-            let (lookup_requests, lookups) = rows::collect_lookup_requests(&pipeline);
-            pipeline.lookups = lookups;
-            pipeline.refresh_memory();
-            let batch = RustOtelBatch {
-                state: Arc::new(Mutex::new(Some(pipeline))),
-                evaluation_rows: Arc::default(),
-            };
-            Ok(PreparedOtelBatch {
-                batch,
-                media_requests,
-                lookup_requests,
-                trace_ids,
+            with_quiet_logging(suppress_logging, || {
+                let (build_config, storage_context) = context.into_configs();
+                let mut events = parse_events(&source, &build_config)?;
+                media::restore_lookup_fields(&mut events, &source.media)?;
+                let trace_ids = unique_trace_ids(&events);
+                let mut pipeline = Pipeline::new(source, events, storage_context, pipeline_memory);
+                let media_requests = media::collect_media_requests(&mut pipeline)?;
+                let (lookup_requests, lookups) = rows::collect_lookup_requests(&pipeline);
+                pipeline.lookups = lookups;
+                pipeline.refresh_memory();
+                let batch = RustOtelBatch {
+                    state: Arc::new(Mutex::new(Some(pipeline))),
+                    evaluation_rows: Arc::default(),
+                    suppress_logging,
+                };
+                Ok(PreparedOtelBatch {
+                    batch,
+                    media_requests,
+                    lookup_requests,
+                    trace_ids,
+                })
             })
         })))
     }
@@ -355,6 +362,7 @@ impl RustOtelBatch {
         work: impl FnOnce(&mut Pipeline) -> NativeResult<T> + Send + 'static,
     ) -> AsyncTask<OwnedTask<T>> {
         let state = Arc::clone(&self.state);
+        let suppress_logging = self.suppress_logging;
         AsyncTask::new(OwnedTask::new(move || {
             let mut guard = state
                 .lock()
@@ -363,7 +371,7 @@ impl RustOtelBatch {
                 let pipeline = guard
                     .as_mut()
                     .ok_or_else(|| failure("OTEL batch already disposed"))?;
-                work(pipeline)
+                with_quiet_logging(suppress_logging, || work(pipeline))
             };
             if guard
                 .as_ref()

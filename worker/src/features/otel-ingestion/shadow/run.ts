@@ -1,4 +1,3 @@
-import { context, ROOT_CONTEXT } from "@opentelemetry/api";
 import { prepareOtelJson, type OtelProcessingContext } from "@langfuse/native";
 import {
   logger,
@@ -9,14 +8,20 @@ import {
 import { getDeterministicSamplingValue } from "../../evaluation/deterministicSampling";
 import { ClickhouseWriter } from "../../../services/ClickhouseWriter";
 import { processRustOtelEvents } from "../processRustOtelEvents";
-import { effectDifferences, otelShadowScope, ShadowScope } from "./context";
+import { effectDifferences, ShadowScope } from "./context";
+import { otelProcessingHooks } from "../processingHooks";
 import { shadowJobId, shadowRowKey } from "./rowKey";
 import { drainShadowRows, enqueueShadowRows } from "./verify";
+import { closeShadowWriter } from "./writer";
 
 const prefix = "langfuse.ingestion.otel.shadow.";
 const pending = new Set<Promise<void>>();
 const reservations = new Map<object, number>();
 const maxInputBytes = 64 * 1024 * 1024;
+const writerStages = {
+  primary: "primary_writer",
+  native: "shadow_writer",
+} as const;
 
 type Batch = {
   context: OtelProcessingContext;
@@ -43,28 +48,22 @@ export function reserveSample(
 ) {
   const capacity = () => {
     recordIncrement(prefix + "batch", 1, { outcome: "capacity" });
+    return undefined;
   };
-  if (reservations.size >= 4) {
-    capacity();
-    return;
-  }
+  if (reservations.size >= 4) return capacity();
+
   try {
     const started = performance.now();
     const input = typeof source === "function" ? source() : source;
     const size =
       typeof input === "string" ? Buffer.byteLength(input) : input.byteLength;
     const heldBytes = [...reservations.values()].reduce(
-      (sum, bytes) => sum + bytes,
+      (sum, value) => sum + value,
       0,
     );
-    if (size > maxInputBytes - heldBytes) {
-      capacity();
-      return;
-    }
-    const bytes =
-      typeof input === "string"
-        ? Buffer.from(input, "utf8")
-        : Buffer.from(input);
+    if (size > maxInputBytes - heldBytes) return capacity();
+
+    const bytes = Buffer.from(input);
     const token = {};
     reservations.set(token, size);
     return {
@@ -87,35 +86,32 @@ export type PrimaryStage =
   | "primary_dispose";
 
 export function submitSample(sample: Sample, failure?: PrimaryStage) {
-  // A buffered insert may finish after this queue job returns. Keep each job's
-  // original result and let the writer decide when its comparison can start.
-  const comparison = context
-    .with(ROOT_CONTEXT, () =>
-      compare(sample, failure).catch(() => {
-        logger.warn("OTEL shadow comparison failed", {
-          projectId: sample.context.projectId,
-          jobId: sample.jobId,
-        });
-        recordIncrement(prefix + "batch", 1, { outcome: "error" });
-      }),
-    )
-    .finally(() => {
-      sample.release();
-      pending.delete(comparison);
+  const task = otelProcessingHooks
+    .exit(() => compare(sample, failure))
+    .catch(() => {
+      logger.warn("OTEL shadow comparison failed", {
+        projectId: sample.context.projectId,
+        jobId: sample.jobId,
+      });
+      recordIncrement(prefix + "batch", 1, { outcome: "error" });
     });
-  pending.add(comparison);
+  pending.add(task);
+  const cleanup = () => {
+    sample.release();
+    pending.delete(task);
+  };
+  task.then(cleanup, cleanup);
 }
 
 async function finish(scope: ShadowScope, started: number, failure?: string) {
-  const processed = performance.now();
+  const processingMs = performance.now() - started;
   const receipt = await scope.settle();
-  const writeStage =
-    scope.side === "primary" ? "primary_writer" : "shadow_writer";
+  const stage =
+    failure ?? (receipt === "dropped" ? writerStages[scope.side] : "none");
   return {
     outcome: failure ? ("exception" as const) : receipt,
-    stage: failure ?? (receipt === "dropped" ? writeStage : "none"),
-    processingMs: processed - started,
-    waitMs: performance.now() - processed,
+    stage,
+    processingMs,
     scope,
   };
 }
@@ -139,18 +135,21 @@ async function runNative(sample: Sample) {
   const started = performance.now();
   let stage: string | undefined = "shadow_prepare";
   await withCustomerDataLoggingSuppressed(() =>
-    otelShadowScope.run(scope, async () => {
+    otelProcessingHooks.run(scope, async () => {
       try {
         const batch = await prepareOtelJson(sample.bytes, sample.extractMedia);
         stage = "shadow_process";
         try {
-          await processRustOtelEvents({ batch, context: sample.context });
+          await processRustOtelEvents({
+            batch,
+            context: { ...sample.context, suppressLogging: true },
+          });
         } finally {
           await batch.dispose();
         }
         stage = undefined;
       } catch {
-        // The stage is sufficient for diagnostics. Ingestion errors may carry payloads.
+        // Keep customer payloads out of diagnostics; the stage is sufficient.
       }
     }),
   );
@@ -163,9 +162,7 @@ function classification(primary: Result, native: Result) {
   if (primary.stage !== "none")
     return native.stage !== "none" ? "both_failed" : "primary_only_failure";
   if (native.stage !== "none") return "shadow_only_failure";
-  if (primary.outcome === "empty")
-    return native.outcome === "empty" ? "both_empty" : "primary_empty";
-  return native.outcome === "empty" ? "shadow_empty" : "match";
+  return primary.outcome === native.outcome ? "match" : "different_outcome";
 }
 
 function report(sample: Sample, primary: Result, native: Result) {
@@ -181,84 +178,49 @@ function report(sample: Sample, primary: Result, native: Result) {
     media_extraction: sample.extractMedia ? "enabled" : "disabled",
   };
   recordIncrement(prefix + "pair", 1, tags);
+
   for (const [implementation, result] of [
     ["ts", primary],
     ["rust", native],
   ] as const) {
-    for (const [stage, count] of Object.entries(result.scope.failures)) {
-      recordIncrement(prefix + "operation_failure", count, {
-        implementation,
-        stage,
-      });
-    }
     recordDistribution(
       prefix + "paired_processing_duration_ms",
       result.processingMs,
       { ...tags, implementation },
     );
-    recordDistribution(
-      prefix + "paired_writer_wait_duration_ms",
-      result.waitMs,
-      { ...tags, implementation },
-    );
   }
-  if (primary.processingMs > 0)
-    recordDistribution(
-      prefix + "processing_rust_to_ts_ratio",
-      native.processingMs / primary.processingMs,
-      tags,
-    );
-  const differences = effectDifferences(primary.scope, native.scope);
+
+  const differences = effectDifferences(primary.scope);
   const primaryFailures = primary.scope.failures;
   const nativeFailures = native.scope.failures;
   const hasFailures =
+    primary.stage !== "none" ||
+    native.stage !== "none" ||
     Object.keys(primaryFailures).length > 0 ||
     Object.keys(nativeFailures).length > 0;
-  const coverage =
-    primary.stage === "none" && native.stage === "none" && !hasFailures
-      ? "complete"
-      : "partial";
-  for (const { kind, missing, extra } of differences) {
-    if (missing > 0)
-      recordIncrement(prefix + "effect_difference", missing, {
-        kind,
-        direction: "missing",
-        coverage,
-      });
-    if (extra > 0)
-      recordIncrement(prefix + "effect_difference", extra, {
-        kind,
-        direction: "extra",
-        coverage,
-      });
-  }
-  if (
-    differences.length > 0 ||
-    hasFailures ||
-    (comparison !== "match" && comparison !== "both_empty")
-  ) {
-    const rows =
-      primary.scope.rows.length > 0 ? primary.scope.rows : native.scope.rows;
-    logger.info("OTEL shadow batch differs or is incomplete", {
-      ...tags,
-      coverage,
-      jobId: sample.jobId,
-      projectId: sample.context.projectId,
-      primaryInserted: primary.scope.rows.length,
-      shadowInserted: native.scope.rows.length,
-      differences,
-      primaryFailures,
-      nativeFailures,
-      batchRowKeys: rows
-        .slice(0, 3)
-        .map((row) => shadowRowKey(sample.context.projectId, row)),
-    });
-  }
+  if (differences.length === 0 && !hasFailures && comparison === "match")
+    return;
+
+  const rows =
+    primary.scope.rows.length > 0 ? primary.scope.rows : native.scope.rows;
+  logger.info("OTEL shadow batch differs or is incomplete", {
+    ...tags,
+    jobId: sample.jobId,
+    projectId: sample.context.projectId,
+    primaryInserted: primary.scope.rows.length,
+    shadowInserted: native.scope.rows.length,
+    differences,
+    primaryFailures,
+    nativeFailures,
+    batchRowKeys: rows
+      .slice(0, 3)
+      .map((row) => shadowRowKey(sample.context.projectId, row)),
+  });
 }
 
 export async function shutdownOtelWriters() {
-  await ClickhouseWriter.shutdownAll(async () => {
-    await Promise.all(pending);
-  });
+  await ClickhouseWriter.shutdownAll();
+  await Promise.all(pending);
+  await closeShadowWriter();
   await drainShadowRows();
 }

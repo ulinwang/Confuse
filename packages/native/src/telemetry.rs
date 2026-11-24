@@ -15,6 +15,15 @@ use metrics::Label;
 use metrics_exporter_dogstatsd::DogStatsDBuilder;
 use tracing_subscriber::EnvFilter;
 
+pub(crate) fn with_quiet_logging<T>(quiet: bool, work: impl FnOnce() -> T) -> T {
+    if !quiet {
+        return work();
+    }
+
+    let dispatcher = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    tracing::dispatcher::with_default(&dispatcher, work)
+}
+
 /// Overrides for values that otherwise come from the environment.
 #[derive(Debug, Clone, Default)]
 pub struct Config {

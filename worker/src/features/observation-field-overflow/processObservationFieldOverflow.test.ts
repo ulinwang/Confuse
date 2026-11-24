@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { MediaAssociationOrigin } from "@langfuse/shared";
 import type { EventRecordInsertType } from "@langfuse/shared/src/server";
-import { otelShadowScope, ShadowScope } from "../otel-ingestion/shadow/context";
 
 const mocks = vi.hoisted(() => {
   const span = { setAttributes: vi.fn() };
@@ -154,24 +153,6 @@ describe("applyObservationFieldOverflow", () => {
       "langfuse.ingestion.observation_field_overflow.processing_duration_ms",
       expect.any(Number),
     );
-  });
-
-  it("captures overflow identity without retaining the value", async () => {
-    const value = "x".repeat(100);
-    const primaryRecord = createEventRecord({ input: value });
-    const primary = new ShadowScope("primary", {});
-    mocks.uploadMediaForTrace.mockResolvedValue({
-      mediaId: "input-media",
-      outcome: "uploaded",
-    });
-
-    const result = await otelShadowScope.run(primary, () =>
-      applyObservationFieldOverflow(primaryRecord),
-    );
-
-    expect(result.input).toBe(mediaReference("input-media"));
-    expect(mocks.uploadMediaForTrace).toHaveBeenCalledOnce();
-    expect(JSON.stringify([...primary.effects])).not.toContain(value);
   });
 
   it("applies the limit to each metadata value rather than their aggregate size", async () => {

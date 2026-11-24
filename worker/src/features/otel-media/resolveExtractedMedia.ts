@@ -24,17 +24,16 @@ import {
   rewriteMediaValues,
   type MediaRegistry,
 } from "./mediaReferenceText";
-import { otelShadowScope } from "../otel-ingestion/shadow/context";
 import {
-  recordOtelMediaResult,
-  replayOtelMediaResult,
-  type ShadowMediaUploadResult,
+  associateOtelMedia,
+  shouldRecordOtelMediaMetrics,
+  type OtelMediaUploadResult,
   uploadOtelMedia,
-} from "../otel-ingestion/shadow/media";
+} from "./uploadHooks";
 
 const MEDIA_PAGE_SIZE = 4_096;
 
-export type CachedMediaUpload = ShadowMediaUploadResult;
+export type CachedMediaUpload = OtelMediaUploadResult;
 
 // Retain descriptor metadata and completed upload results for the batch's lifetime.
 // Decoded bodies and restored source strings stay local to each processing call.
@@ -128,10 +127,6 @@ export async function uploadExtractedMediaOnce(params: {
     sha256Hash,
   } as const;
 
-  if (otelShadowScope.getStore()?.side === "native") {
-    return replayOtelMediaResult(identity);
-  }
-
   const cache =
     mediaUploadCache.get(batch) ??
     new Map<string, Promise<CachedMediaUpload>>();
@@ -140,37 +135,40 @@ export async function uploadExtractedMediaOnce(params: {
   const cached = cache.get(key);
   if (cached) {
     const result = await cached;
-    await linkMediaToTraceOrObservation({
-      projectId,
-      traceId,
-      observationId,
-      mediaId: result.mediaId,
-      field,
-      origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
-    });
-    return recordOtelMediaResult(identity, { ...result, outcome: "reused" });
-  }
-
-  const uploadPromise = otelMediaUploads.run(params.byteLengthUpperBound, () =>
-    uploadOtelMedia({
-      ...identity,
-      loadBody,
-      upload: async (contentBytes, capturedHash) => ({
-        ...(await uploadMediaForTrace({
+    const reused = { ...result, outcome: "reused" as const };
+    return associateOtelMedia({
+      identity,
+      result: reused,
+      associate: () =>
+        linkMediaToTraceOrObservation({
           projectId,
           traceId,
           observationId,
+          mediaId: result.mediaId,
           field,
-          contentType,
-          contentBytes,
-          sha256Hash: capturedHash ?? sha256Hash,
-          mediaBucket,
-          mediaPrefix,
           origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
-        })),
+        }),
+    });
+  }
+
+  const uploadPromise = uploadOtelMedia({
+    ...identity,
+    loadBody,
+    admit: (work) => otelMediaUploads.run(params.byteLengthUpperBound, work),
+    upload: (contentBytes, capturedHash) =>
+      uploadMediaForTrace({
+        projectId,
+        traceId,
+        observationId,
+        field,
+        contentType,
+        contentBytes,
+        sha256Hash: capturedHash ?? sha256Hash,
+        mediaBucket,
+        mediaPrefix,
+        origin: MediaAssociationOrigin.INGESTION_MEDIA_EXTRACTION,
       }),
-    }),
-  );
+  });
   cache.set(key, uploadPromise);
   try {
     return await uploadPromise;
@@ -317,9 +315,7 @@ export function recordExtractedMediaUpload(
   byteLength?: number,
   bytesRemoved = 0,
 ): void {
-  // Native shadow replays the primary result; it did not upload or remove any
-  // bytes, so do not publish synthetic production media telemetry.
-  if (otelShadowScope.getStore()?.side === "native") return;
+  if (!shouldRecordOtelMediaMetrics()) return;
   const tags = {
     outcome,
     media_kind: kind,

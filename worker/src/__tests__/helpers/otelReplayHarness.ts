@@ -17,6 +17,7 @@ import {
 
 import { ClickhouseWriter, TableName } from "../../services/ClickhouseWriter";
 import { initializeEventByteAccounting } from "../../services/ClickhouseWriter/eventByteAccounting";
+import { getShadowWriter } from "../../features/otel-ingestion/shadow/writer";
 import { shutdownOtelWriters } from "../../features/otel-ingestion/shadow/run";
 import { otelIngestionQueueProcessorBuilder } from "../../queues/otelIngestionQueue";
 import { ingestionQueueProcessorBuilder } from "../../queues/ingestionQueue";
@@ -258,9 +259,7 @@ export async function runOneOtelReplay(
   let nativeWriter:
     | ReturnType<typeof ClickhouseWriter.getNativeInstance>
     | undefined;
-  let nativeTestWriter:
-    | ReturnType<typeof ClickhouseWriter.getNativeTestInstance>
-    | undefined;
+  let nativeTestWriter: ReturnType<typeof getShadowWriter> | undefined;
   let restoreVerifierQuery: (() => void) | undefined;
   let jsonEventsFullInsertCount = 0;
   let nativeInsert = false;
@@ -331,44 +330,24 @@ export async function runOneOtelReplay(
     const exec = async (
       execParams: Parameters<ClickhouseClientType["exec"]>[0],
     ) => {
-      if (execParams.query === "INSERT INTO events_native_test FORMAT Native") {
-        if (!shadowEnabled) {
-          throw new Error(
-            `OTEL replay unexpectedly used the shadow writer: ${execParams.query}`,
-          );
-        }
-        if (params.shadow?.failNativeInsert) {
-          throw new Error("simulated shadow native insert failure");
-        }
-        if (!("values" in execParams)) {
-          throw new Error(
-            "Shadow native OTEL replay insert has no values stream",
-          );
-        }
-        return client.exec({
-          ...execParams,
-          query: `INSERT INTO ${shadowTableName} FORMAT Native`,
-          values: execParams.values,
-        });
-      }
-      if (params.mode !== "early-rust") {
+      const isShadow =
+        execParams.query === "INSERT INTO events_native_test FORMAT Native";
+      const allowed = isShadow
+        ? shadowEnabled
+        : params.mode === "early-rust" &&
+          execParams.query === "INSERT INTO events_full FORMAT Native";
+      if (!allowed || !("values" in execParams)) {
         throw new Error(
-          `${params.mode} replay unexpectedly used ClickHouse exec: ${execParams.query}`,
+          `Unexpected Native OTEL replay insert: ${execParams.query}`,
         );
       }
-      if (execParams.query !== "INSERT INTO events_full FORMAT Native") {
-        throw new Error(
-          `Unexpected ClickHouse exec query in OTEL replay: ${execParams.query}`,
-        );
+      if (isShadow && params.shadow?.failNativeInsert) {
+        throw new Error("simulated shadow native insert failure");
       }
-      if (!("values" in execParams)) {
-        throw new Error("Native OTEL replay insert has no values stream");
-      }
-
-      nativeInsert = true;
+      if (!isShadow) nativeInsert = true;
       return client.exec({
         ...execParams,
-        query: `INSERT INTO ${tableName} FORMAT Native`,
+        query: `INSERT INTO ${isShadow ? shadowTableName : tableName} FORMAT Native`,
         values: execParams.values,
       });
     };
@@ -384,7 +363,7 @@ export async function runOneOtelReplay(
     writer = ClickhouseWriter.getInstance(testClient);
     nativeWriter = ClickhouseWriter.getNativeInstance(testClient);
     if (shadowEnabled) {
-      nativeTestWriter = ClickhouseWriter.getNativeTestInstance(testClient);
+      nativeTestWriter = getShadowWriter(testClient);
     }
 
     const processor = otelIngestionQueueProcessorBuilder(false);

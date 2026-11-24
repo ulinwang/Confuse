@@ -286,17 +286,20 @@ export const addUserToSpan = (
   return opentelemetry.propagation.setBaggage(ctx, baggage);
 };
 
-// A public proxy tracer with no delegate is a real no-op tracer without
-// changing the process-wide provider for other requests.
-const customerDataSuppressedTracer = new opentelemetry.ProxyTracer(
-  { getDelegateTracer: () => undefined },
-  "customer-data-suppressed",
-);
+let suppressedTracer: opentelemetry.Tracer | undefined;
 
-export const getTracer = (name: string) =>
-  isCustomerDataLoggingSuppressed()
-    ? customerDataSuppressedTracer
-    : opentelemetry.trace.getTracer(name);
+export function getTracer(name: string) {
+  if (!isCustomerDataLoggingSuppressed())
+    return opentelemetry.trace.getTracer(name);
+  // An undelegated tracer cannot export attributes from this scope.
+  if (!suppressedTracer) {
+    suppressedTracer = new opentelemetry.ProxyTracer(
+      { getDelegateTracer: () => undefined },
+      "customer-data-suppressed",
+    );
+  }
+  return suppressedTracer;
+}
 
 const cloudWatchClient = new CloudWatchClient();
 let lastFlushTime = 0;

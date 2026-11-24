@@ -17,7 +17,7 @@ import {
   uploadMediaForTrace,
 } from "@langfuse/shared/src/server";
 import { MediaAssociationOrigin } from "@langfuse/shared";
-import { uploadOtelMedia } from "../otel-ingestion/shadow/media";
+import { uploadOtelMedia } from "./uploadHooks";
 
 const MEDIA_FIELDS = ["input", "output", "metadata"] as const;
 

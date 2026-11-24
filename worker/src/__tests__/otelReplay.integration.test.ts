@@ -3228,88 +3228,91 @@ describe(
       },
     );
 
+    function sample(
+      options: Partial<Parameters<typeof runOneOtelReplay>[0]> = {},
+    ) {
+      return runOneOtelReplay({
+        mode: "original-ts",
+        bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
+        projectId: PROJECT_ID,
+        fileKey: FILE_KEY,
+        shadow: { sampleRate: 1 },
+        ...options,
+      });
+    }
+
+    const expectPair = (tags: Record<string, string>) =>
+      expect(otelReplayMocks.recordIncrement).toHaveBeenCalledWith(
+        "langfuse.ingestion.otel.shadow.pair",
+        1,
+        expect.objectContaining(tags),
+      );
+
     it.each([
       ["events_only", "original-ts"],
       ["dual", "early-ts"],
     ] as const)(
-      "runs the sampled native shadow after the primary receipt in %s/%s mode",
+      "compares stored rows and real effects in %s/%s mode",
       async (writeMode, mode) => {
         useProductionModelLookup();
-        const createdProject =
+        const project =
           writeMode === "dual" ? await createOrgProjectAndApiKey() : undefined;
-        const projectId =
-          createdProject?.projectId ?? `${PROJECT_ID}-shadow-${writeMode}`;
         try {
-          const uploadStart =
-            otelReplayMocks.uploadMediaForTrace.mock.calls.length;
-          const evalStart =
-            otelReplayMocks.scheduleObservationEvals.mock.calls.length;
-          const result = await runOneOtelReplay({
+          const result = await sample({
             mode,
-            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
-            projectId,
-            orgId: createdProject?.orgId,
-            fileKey: `${FILE_KEY}.shadow-${writeMode}`,
+            writeMode,
+            projectId: project?.projectId ?? PROJECT_ID,
+            orgId: project?.orgId,
             mediaUploadEnabled: true,
             overflowEnabled: true,
             overflowSizeLimitBytes: 256,
-            writeMode,
-            shadow: { sampleRate: 1 },
           });
-
-          expect(result.shadowTableProvisioned).toBe(true);
-          expect(result.shadowRows).toBeDefined();
+          expect(result.shadowRows).toHaveLength(2);
           expect(comparableOtelReplayRows(result.shadowRows)).toEqual(
             comparableOtelReplayRows(result.storedRows),
           );
+          expect(otelReplayMocks.uploadMediaForTrace).toHaveBeenCalledTimes(
+            writeMode === "dual" ? 4 : 2,
+          );
           expect(
-            otelReplayMocks.uploadMediaForTrace.mock.calls.length - uploadStart,
-          ).toBe(writeMode === "dual" ? 4 : 2);
-          expect(
-            otelReplayMocks.scheduleObservationEvals.mock.calls.length -
-              evalStart,
-          ).toBe(4);
-          if (writeMode === "dual") {
-            expect(result.legacyRows?.observations).toHaveLength(2);
-          }
-
-          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
-            "langfuse.ingestion.otel.shadow.pair",
-            1,
-            expect.objectContaining({
-              primary_outcome: "inserted",
-              shadow_outcome: "inserted",
-              comparison: "match",
-            }),
-          ]);
-          const processing =
-            otelReplayMocks.recordDistribution.mock.calls.filter(
-              ([name]) =>
-                name ===
-                "langfuse.ingestion.otel.shadow.paired_processing_duration_ms",
-            );
-          expect(processing).toHaveLength(2);
-          expect(
-            processing
-              .map(
-                ([, , tags]) =>
-                  (tags as { implementation: string }).implementation,
-              )
-              .sort(),
-          ).toEqual(["rust", "ts"]);
-          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
+            otelReplayMocks.scheduleObservationEvals,
+          ).toHaveBeenCalledTimes(4);
+          if (project) expect(result.legacyRows?.observations).toHaveLength(2);
+          expectPair({
+            comparison: "match",
+            primary_outcome: "inserted",
+            shadow_outcome: "inserted",
+          });
+          expect(otelReplayMocks.recordIncrement).toHaveBeenCalledWith(
             "langfuse.ingestion.otel.shadow.row_verification",
             2,
             { outcome: "matched" },
-          ]);
+          );
+          for (const implementation of ["ts", "rust"]) {
+            expect(otelReplayMocks.recordDistribution).toHaveBeenCalledWith(
+              "langfuse.ingestion.otel.shadow.paired_processing_duration_ms",
+              expect.any(Number),
+              expect.objectContaining({ implementation }),
+            );
+          }
+          if (mode === "original-ts") {
+            for (const metric of [
+              "batch_byte_length",
+              "processing_duration_ms",
+            ]) {
+              expect(
+                otelReplayMocks.recordDistribution,
+              ).not.toHaveBeenCalledWith(
+                `langfuse.ingestion.otel.media.${metric}`,
+                expect.any(Number),
+                { write_path: "direct", media_path: "early" },
+              );
+            }
+          }
         } finally {
-          if (createdProject) {
-            await prisma.project.delete({
-              where: { id: createdProject.projectId },
-            });
-            await prisma.organization.delete({
-              where: { id: createdProject.orgId },
-            });
+          if (project) {
+            await prisma.project.delete({ where: { id: project.projectId } });
+            await prisma.organization.delete({ where: { id: project.orgId } });
           }
         }
       },
@@ -3323,131 +3326,67 @@ describe(
           throw failure;
         });
       try {
-        await expect(
-          runOneOtelReplay({
-            mode: "original-ts",
-            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
-            projectId: PROJECT_ID,
-            fileKey: FILE_KEY,
-            shadow: { sampleRate: 1 },
-          }),
-        ).rejects.toMatchObject({ cause: failure });
-        expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
-          "langfuse.ingestion.otel.shadow.pair",
-          1,
-          expect.objectContaining({
-            comparison: "primary_only_failure",
-            primary_outcome: "exception",
-            shadow_outcome: "inserted",
-          }),
-        ]);
+        await expect(sample()).rejects.toMatchObject({ cause: failure });
+        expectPair({
+          comparison: "primary_only_failure",
+          primary_outcome: "exception",
+          shadow_outcome: "inserted",
+        });
       } finally {
         primary.mockRestore();
       }
     });
 
-    it("does not provision or read a shadow table at zero sample rate", async () => {
-      const nativeTestWriter = vi.spyOn(
-        ClickhouseWriter,
-        "getNativeTestInstance",
+    it("works with no shadow table at the default sample rate", async () => {
+      const result = await sample({ shadow: undefined });
+      expect(result.storedRows).toHaveLength(2);
+      expect(result.shadowTableProvisioned).toBe(false);
+      expect(result.shadowRows).toBeUndefined();
+      expect(otelReplayMocks.recordIncrement).not.toHaveBeenCalledWith(
+        "langfuse.ingestion.otel.shadow.pair",
+        expect.anything(),
+        expect.anything(),
       );
-      try {
-        const result = await runOneOtelReplay({
-          mode: "original-ts",
-          bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
-          projectId: `${PROJECT_ID}-shadow-zero-rate`,
-          fileKey: `${FILE_KEY}.shadow-zero-rate`,
-        });
-
-        expect(result.storedRows).toHaveLength(2);
-        expect(result.shadowTableProvisioned).toBe(false);
-        expect(result.shadowRows).toBeUndefined();
-        expect(nativeTestWriter).not.toHaveBeenCalled();
-        expect(
-          otelReplayMocks.recordIncrement.mock.calls.some(
-            ([name]) => name === "langfuse.ingestion.otel.shadow.pair",
-          ),
-        ).toBe(false);
-      } finally {
-        nativeTestWriter.mockRestore();
-      }
     });
 
-    it.each([
-      {
-        name: "primary-only",
-        shadow: { failPrimaryInsert: true },
-        primaryRows: 0,
-        shadowRows: 2,
-        primaryOutcome: "dropped",
-        shadowOutcome: "inserted",
-        primaryStage: "primary_writer",
-        shadowStage: "none",
-      },
-      {
-        name: "shadow-only",
-        shadow: { failNativeInsert: true },
-        primaryRows: 2,
-        shadowRows: 0,
-        primaryOutcome: "inserted",
-        shadowOutcome: "dropped",
-        primaryStage: "none",
-        shadowStage: "shadow_writer",
-      },
-    ] as const)(
-      "keeps the other side observable for a %s writer failure and reports safe diagnostics",
-      async ({
-        name,
-        shadow,
-        primaryRows,
-        shadowRows,
-        primaryOutcome,
-        shadowOutcome,
-        primaryStage,
-        shadowStage,
-      }) => {
-        const projectId = `${PROJECT_ID}-${name}-failure`;
-        const fileKey = `${FILE_KEY}.${name}-failure`;
-        const logInfo = vi.spyOn(sharedServer.logger, "info");
+    it.each(["primary", "shadow"] as const)(
+      "attributes a %s writer failure without logging payloads",
+      async (side) => {
+        const primary = side === "primary";
+        const log = vi.spyOn(sharedServer.logger, "info");
         try {
-          const result = await runOneOtelReplay({
-            mode: "original-ts",
-            bytes: Buffer.from(JSON.stringify(buildResourceSpans())),
-            projectId,
-            fileKey,
-            shadow: { ...shadow, sampleRate: 1, maxAttempts: 1 },
+          const result = await sample({
+            shadow: {
+              sampleRate: 1,
+              maxAttempts: 1,
+              failPrimaryInsert: primary,
+              failNativeInsert: !primary,
+            },
           });
-
-          expect(result.storedRows).toHaveLength(primaryRows);
-          expect(result.shadowRows).toHaveLength(shadowRows);
-          expect(otelReplayMocks.recordIncrement.mock.calls).toContainEqual([
-            "langfuse.ingestion.otel.shadow.pair",
-            1,
-            expect.objectContaining({
-              primary_outcome: primaryOutcome,
-              shadow_outcome: shadowOutcome,
-            }),
-          ]);
-
-          const report = logInfo.mock.calls.find(
+          expect(result.storedRows).toHaveLength(primary ? 0 : 2);
+          expect(result.shadowRows).toHaveLength(primary ? 2 : 0);
+          expectPair({
+            primary_outcome: primary ? "dropped" : "inserted",
+            shadow_outcome: primary ? "inserted" : "dropped",
+          });
+          const report = log.mock.calls.find(
             ([message]) =>
               message === "OTEL shadow batch differs or is incomplete",
-          )?.[1] as Record<string, unknown> | undefined;
+          )?.[1];
           expect(report).toMatchObject({
-            projectId,
-            primaryInserted: primaryRows,
-            shadowInserted: shadowRows,
-            primary_error_stage: primaryStage,
-            shadow_error_stage: shadowStage,
-            coverage: "partial",
+            projectId: PROJECT_ID,
+            primary_error_stage: primary ? "primary_writer" : "none",
+            shadow_error_stage: primary ? "none" : "shadow_writer",
             batchRowKeys: expect.any(Array),
           });
-          const serializedReport = JSON.stringify(report);
-          expect(serializedReport).not.toContain(fileKey);
-          expect(serializedReport).not.toContain("short replay answer");
-          expect(serializedReport).not.toContain("plain input");
+          for (const privateValue of [
+            FILE_KEY,
+            "short replay answer",
+            "plain input",
+          ])
+            expect(JSON.stringify(report)).not.toContain(privateValue);
         } finally {
-          logInfo.mockRestore();
+          log.mockRestore();
         }
       },
     );
