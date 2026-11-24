@@ -25,6 +25,7 @@ import {
   Box,
   Gauge,
   KeyRound,
+  ShieldCheck,
 } from "@langfuse/icons";
 import { useRouter } from "next/router";
 import { type ReactNode } from "react";
@@ -137,6 +138,11 @@ export const ROUTES: Route[] = [
         title: "Budgets",
         slug: GATEWAY_PAGE_SLUGS.budgets,
         icon: Gauge,
+      },
+      {
+        title: "Guardrails",
+        slug: GATEWAY_PAGE_SLUGS.guardrails,
+        icon: ShieldCheck,
       },
       {
         title: "Gateway keys",
