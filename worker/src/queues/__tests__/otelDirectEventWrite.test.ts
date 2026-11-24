@@ -432,7 +432,6 @@ describe("native Rust trace activity", () => {
       vi.clearAllMocks();
     }
   });
-
 });
 
 vi.mock("../../features/traceDispatch/traceRuleRecording", () => ({
