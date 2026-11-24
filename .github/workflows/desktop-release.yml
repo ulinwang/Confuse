@@ -1,0 +1,154 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Desktop version to release (must match desktop/package.json)
+        required: true
+        type: string
+        default: "0.1.0"
+
+permissions: {}
+
+concurrency:
+  group: desktop-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            version="${GITHUB_REF_NAME#desktop-v}"
+          else
+            version="$INPUT_VERSION"
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]]; then
+            echo "Invalid desktop version: $version" >&2
+            exit 1
+          fi
+          package_version="$(node -p "require('./desktop/package.json').version")"
+          if [[ "$version" != "$package_version" ]]; then
+            echo "Version $version does not match desktop/package.json ($package_version)" >&2
+            exit 1
+          fi
+          node -e 'const fs = require("node:fs"); const version = process.argv[1]; const compose = fs.readFileSync("desktop/resources/compose.yml", "utf8"); for (const name of ["web", "worker"]) { if (!compose.includes(`ghcr.io/ulinwang/confuse-${name}:${version}`)) throw new Error(`Compose default for ${name} does not match ${version}`); }' "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=desktop-v$version" >> "$GITHUB_OUTPUT"
+
+  images:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CONFUSE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare Docker Buildx
+        run: |
+          docker buildx create --name confuse-desktop --driver docker-container --use
+          docker buildx inspect --bootstrap
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and publish multi-architecture images
+        run: node desktop/scripts/build-images.mjs --push --tag "$CONFUSE_RELEASE_VERSION"
+
+  test:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: false
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - name: Test desktop
+        run: pnpm --filter @confuse/desktop test
+
+  dmg:
+    needs: [prepare, images, test]
+    runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: false
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - name: Build macOS DMGs
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm --filter @confuse/desktop make:mac
+      - name: Upload DMG artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-dmg-${{ env.RELEASE_VERSION }}
+          path: desktop/out/**/*.dmg
+          if-no-files-found: error
+          retention-days: 7
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifacts=()
+          while IFS= read -r -d '' artifact; do
+            artifacts+=("$artifact")
+          done < <(find desktop/out -type f -name '*.dmg' -print0)
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "No DMG artifacts found" >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" "${artifacts[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "Confuse Desktop $RELEASE_VERSION" \
+              --generate-notes
+          fi
