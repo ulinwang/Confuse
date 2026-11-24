@@ -58,17 +58,26 @@ export class JobManager {
     if (
       record.job.state !== "failed" &&
       record.job.state !== "cancelled" &&
-      record.job.state !== "partially-succeeded"
+      record.job.state !== "partially-succeeded" &&
+      record.job.state !== "waiting-for-review"
     ) {
       throw new Error(
-        "Only failed, cancelled, or partially completed jobs can be retried",
+        "Only failed, cancelled, partially completed, or waiting jobs can be retried",
       );
     }
-    return this.enqueue({
+    const job = this.enqueue({
       kind: record.job.kind,
       agentKind: record.job.agentKind,
       payload: record.payload,
     });
+    if (record.job.state === "waiting-for-review") {
+      const superseded = this.store.updateJob(record.job.id, {
+        state: "cancelled",
+        message: `Retry queued as ${job.id}`,
+      });
+      this.events.emit("desktop.job-changed", superseded);
+    }
+    return job;
   }
 
   async drain(): Promise<void> {

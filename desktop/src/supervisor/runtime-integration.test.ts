@@ -223,6 +223,168 @@ describe("supervisor Agent integration", () => {
       expect(delivered).toHaveLength(2);
     },
   );
+  it("resumes a trusted Codex connection once and imports its history", async () => {
+    let trusted = false;
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => trusted,
+      waitingCodexJobPollMs: 10,
+    });
+    await installFakeCodex(fixture.applications);
+    const historyFile = join(fixture.home, ".codex", "history.jsonl");
+    await mkdir(join(fixture.home, ".codex"), { recursive: true });
+    await writeFile(
+      historyFile,
+      `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          thread_id: "synthetic-thread",
+          turn_id: "turn-1",
+          item: { type: "function_call", id: "item-1", name: "synthetic_tool" },
+        },
+      })}\n`,
+    );
+    const delivered: OutboxRecord[] = [];
+    fixture.supervisor.setOutboxDispatcher(async (record) => {
+      delivered.push(record);
+    });
+    await fixture.supervisor.start({ runtime: false });
+
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "chatgpt-codex", importHistory: true }],
+    });
+    await fixture.supervisor.jobs.drain();
+    const waitingId = connected.result.jobIds[0] as string;
+    expect(fixture.supervisor.store.getJob(waitingId).job.state).toBe(
+      "waiting-for-review",
+    );
+    expect(delivered).toHaveLength(0);
+
+    trusted = true;
+    await waitFor(() =>
+      fixture.supervisor.store
+        .listJobs()
+        .some(
+          (job) =>
+            job.kind === "connect" &&
+            job.id !== waitingId &&
+            job.state === "succeeded",
+        ),
+    );
+    await fixture.supervisor.jobs.drain();
+    await waitFor(() => delivered.length === 1);
+
+    expect(fixture.supervisor.store.getJob(waitingId).job.state).toBe(
+      "cancelled",
+    );
+    expect(delivered[0].payload).toMatchObject({
+      agent: "chatgpt-codex",
+      sessionId: "synthetic-thread",
+      metadata: { historical: true },
+    });
+    const recoveredJobs = fixture.supervisor.store
+      .listJobs()
+      .filter((job) => job.kind === "connect");
+    expect(recoveredJobs).toHaveLength(2);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await fixture.supervisor.jobs.drain();
+    expect(
+      fixture.supervisor.store
+        .listJobs()
+        .filter((job) => job.kind === "connect"),
+    ).toHaveLength(2);
+    expect(delivered).toHaveLength(1);
+  });
+
+  it("uses only a validated new Codex hook as recovery evidence", async () => {
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => false,
+      waitingCodexJobPollMs: 100000,
+    });
+    await installFakeCodex(fixture.applications);
+    const historyFile = join(fixture.home, ".codex", "history.jsonl");
+    await mkdir(join(fixture.home, ".codex"), { recursive: true });
+    await writeFile(
+      historyFile,
+      `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          thread_id: "synthetic-hook-thread",
+          turn_id: "turn-1",
+          item: { type: "function_call", id: "item-1", name: "synthetic_tool" },
+        },
+      })}\n`,
+    );
+    const delivered: OutboxRecord[] = [];
+    fixture.supervisor.setOutboxDispatcher(async (record) => {
+      delivered.push(record);
+    });
+    await fixture.supervisor.start({ runtime: false });
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "chatgpt-codex", importHistory: true }],
+    });
+    await fixture.supervisor.jobs.drain();
+    const waitingId = connected.result.jobIds[0] as string;
+
+    expect(
+      (
+        await postHook(fixture.socketPath, {
+          source: "confuse-agent-hook",
+          agent: "chatgpt-codex",
+          payload: { hook_event_name: "SessionStart" },
+        })
+      ).body,
+    ).toEqual({ error: "Invalid Agent event" });
+    await fixture.supervisor.jobs.drain();
+    expect(fixture.supervisor.store.listJobs()).toHaveLength(1);
+
+    const envelope = {
+      source: "confuse-agent-hook",
+      agent: "chatgpt-codex",
+      payload: {
+        hook_event_name: "SessionStart",
+        session_id: "synthetic-live-thread",
+        event_id: "event-1",
+      },
+    };
+    expect((await postHook(fixture.socketPath, envelope)).body).toEqual({
+      accepted: 1,
+    });
+    await fixture.supervisor.jobs.drain();
+    await waitFor(() =>
+      delivered.some((record) => {
+        const event = record.payload as TelemetryEvent;
+        return (
+          event.agent === "chatgpt-codex" && event.metadata?.historical === true
+        );
+      }),
+    );
+    expect(fixture.supervisor.store.getJob(waitingId).job.state).toBe(
+      "cancelled",
+    );
+    expect(
+      fixture.supervisor.store
+        .listJobs()
+        .filter((job) => job.kind === "connect"),
+    ).toHaveLength(2);
+
+    expect((await postHook(fixture.socketPath, envelope)).body).toEqual({
+      accepted: 1,
+    });
+    await fixture.supervisor.jobs.drain();
+    expect(
+      fixture.supervisor.store
+        .listJobs()
+        .filter((job) => job.kind === "connect"),
+    ).toHaveLength(2);
+    expect(
+      delivered.filter(
+        (record) =>
+          (record.payload as TelemetryEvent).metadata?.historical === true,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("rejects configuration writes outside the discovered Agent home", async () => {
     const fixture = await createFixture();
     await installFakeKimi(fixture.bin);
@@ -276,7 +438,12 @@ describe("SdkOutboxDispatcher", () => {
   });
 });
 
-async function createFixture() {
+async function createFixture(
+  options: {
+    isCodexHookTrusted?: (command: string) => Promise<boolean>;
+    waitingCodexJobPollMs?: number;
+  } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "confuse-rt-"));
   directories.push(root);
   const stateDir = join(root, "state");
@@ -302,7 +469,11 @@ async function createFixture() {
         homeDir: home,
         env: { HOME: home, PATH: bin },
         applicationDirs: [applications],
+        ...(options.isCodexHookTrusted === undefined
+          ? {}
+          : { isCodexHookTrusted: options.isCodexHookTrusted }),
       },
+      waitingCodexJobPollMs: options.waitingCodexJobPollMs,
     },
   );
   supervisors.push(supervisor);
@@ -311,8 +482,19 @@ async function createFixture() {
     socketPath,
     bin,
     root,
+    home,
+    applications,
     historyFile: join(historyDirectory, "wire.jsonl"),
   };
+}
+
+async function installFakeCodex(applications: string): Promise<void> {
+  const contents = join(applications, "ChatGPT.app", "Contents");
+  await mkdir(contents, { recursive: true });
+  await writeFile(
+    join(contents, "Info.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>\n<key>CFBundleIdentifier</key><string>com.openai.codex</string>\n<key>CFBundleShortVersionString</key><string>1.0.0</string>\n</dict></plist>\n`,
+  );
 }
 
 async function installFakeKimi(bin: string): Promise<void> {

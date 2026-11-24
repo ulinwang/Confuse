@@ -24,6 +24,7 @@ import { discoverJsonlHistorySources } from "./history/discovery";
 import { openDshHistory } from "./history/dsh";
 import { HistoryService } from "./history/service";
 import type { HistorySource, JsonlAgentKind } from "./history/types";
+import type { JobManager } from "./jobs";
 import type { DesktopStore } from "./store";
 import { ingestionToTelemetry } from "./telemetry/ingestion";
 import type { OutboxEntry } from "./telemetry/types";
@@ -37,6 +38,20 @@ const hookEnvelope = z
   })
   .strict();
 
+const codexConnectPayload = z
+  .object({
+    selections: z.tuple([
+      z
+        .object({
+          kind: z.literal("chatgpt-codex"),
+          configPath: z.string().min(1).max(4_096).optional(),
+          importHistory: z.boolean(),
+        })
+        .strict(),
+    ]),
+  })
+  .strict();
+
 const CONFIGURATION_FILES = {
   "kimi-code": "config.toml",
   "chatgpt-codex": "hooks.json",
@@ -47,17 +62,22 @@ const CONFIGURATION_FILES = {
 export interface AgentRuntimeAdapterDependencies {
   context: AgentContext;
   store: DesktopStore;
+  jobs: JobManager;
   onEnqueued?: () => void;
 }
 
 export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly context: AgentContext;
   private readonly store: DesktopStore;
+  private readonly jobs: JobManager;
   private readonly onEnqueued?: () => void;
+  private resumePromise?: Promise<void>;
+  private codexExecutionObserved = false;
 
   constructor(dependencies: AgentRuntimeAdapterDependencies) {
     this.context = dependencies.context;
     this.store = dependencies.store;
+    this.jobs = dependencies.jobs;
     this.onEnqueued = dependencies.onEnqueued;
   }
 
@@ -117,12 +137,35 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
       throw new Error(result.message);
     }
 
-    this.store.saveAgentConnection(selection, result.state);
+    let connectionState = result.state;
     let message = result.message;
     let state: AgentJobResult["state"] =
       result.state === "waiting-for-review"
         ? "waiting-for-review"
         : "succeeded";
+    if (result.state === "waiting-for-review") {
+      if (selection.kind === "chatgpt-codex" && this.codexExecutionObserved) {
+        connectionState = "connected";
+        state = "succeeded";
+        message = `${message} Hook execution verified.`;
+        this.codexExecutionObserved = false;
+      } else {
+        try {
+          const detected = await detectAgentConnectionState(
+            selection,
+            this.context,
+          );
+          if (detected === "connected") {
+            connectionState = "connected";
+            state = "succeeded";
+            message = `${message} Hook trust verified.`;
+          }
+        } catch {
+          connectionState = "waiting-for-review";
+        }
+      }
+    }
+    this.store.saveAgentConnection(selection, connectionState);
 
     if (!selection.importHistory) {
       try {
@@ -182,6 +225,49 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     };
   }
 
+  async resumeWaitingCodexJobs(codexExecutionObserved = false): Promise<void> {
+    if (codexExecutionObserved) this.codexExecutionObserved = true;
+    if (this.resumePromise) return this.resumePromise;
+    const resume = this.performWaitingCodexJobResume();
+    this.resumePromise = resume;
+    try {
+      await resume;
+    } finally {
+      if (this.resumePromise === resume) this.resumePromise = undefined;
+    }
+  }
+
+  private async performWaitingCodexJobResume(): Promise<void> {
+    const waiting = this.store
+      .listJobs()
+      .filter(
+        (job) =>
+          job.kind === "connect" &&
+          job.agentKind === "chatgpt-codex" &&
+          job.state === "waiting-for-review",
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+    if (!waiting) return;
+
+    try {
+      const record = this.store.getJob(waiting.id);
+      const parsed = codexConnectPayload.safeParse(record.payload);
+      if (!parsed.success) return;
+      if (!this.codexExecutionObserved) {
+        const detected = await detectAgentConnectionState(
+          parsed.data.selections[0],
+          this.context,
+        );
+        if (detected !== "connected" && !this.codexExecutionObserved) return;
+      }
+      if (this.store.getJob(waiting.id).job.state === "waiting-for-review") {
+        this.jobs.retry(waiting.id);
+      }
+    } catch {
+      return;
+    }
+  }
+
   async ingestLiveEvent(input: unknown): Promise<number> {
     const parsed = hookEnvelope.safeParse(input);
     if (!parsed.success) return 0;
@@ -194,6 +280,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     if (events.length === 0) return 0;
 
     const now = new Date().toISOString();
+    let inserted = false;
     for (const event of events) {
       const telemetry = ingestionToTelemetry(parsed.data.agent, event);
       const entry: OutboxEntry = {
@@ -204,9 +291,12 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
         updatedAt: now,
         nextAttemptAt: now,
       };
-      await this.store.putIfAbsent(entry);
+      inserted = (await this.store.putIfAbsent(entry)) || inserted;
     }
     this.onEnqueued?.();
+    if (parsed.data.agent === "chatgpt-codex" && inserted) {
+      await this.resumeWaitingCodexJobs(true);
+    }
     return events.length;
   }
 

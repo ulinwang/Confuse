@@ -17,7 +17,10 @@ export interface AgentContext {
   nodePath: string;
   transport: HookTransport;
   now: () => Date;
-  isCodexHookTrusted?: (command: string) => Promise<boolean>;
+  isCodexHookTrusted?: (
+    command: string,
+    sourcePath: string,
+  ) => Promise<boolean>;
 }
 
 export interface AgentFilePreview {

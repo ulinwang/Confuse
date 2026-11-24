@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { AgentInfo, ConnectAgentSelection } from "../../shared/contracts";
 import { agentPaths, connectWithWrites, normalize } from "./adapter-utils";
+import { CODEX_HOOK_EVENTS } from "./codex-trust";
 import { readBundleMetadata } from "./discovery";
 import { createPreview, readTextIfExists } from "./filesystem";
 import { hookCommand, renderForwarderScript } from "./forwarder";
@@ -15,15 +16,7 @@ import {
 import type { AgentAdapter, AgentContext, PlannedWrite } from "./types";
 
 const KIND = "chatgpt-codex" as const;
-const EVENTS = [
-  "SessionStart",
-  "UserPromptSubmit",
-  "PreToolUse",
-  "PostToolUse",
-  "PostModelRequest",
-  "Stop",
-  "SessionEnd",
-];
+const EVENTS: string[] = [...CODEX_HOOK_EVENTS];
 
 function paths(selection: ConnectAgentSelection, context: AgentContext) {
   const resolved = agentPaths(
@@ -148,7 +141,7 @@ export const chatGptCodexAdapter: AgentAdapter = {
     const discovered = await this.discover(context);
     if (!discovered.installed)
       throw new Error("ChatGPT desktop Codex is not installed");
-    return connectWithWrites(
+    const result = await connectWithWrites(
       KIND,
       selection,
       context,
@@ -156,6 +149,16 @@ export const chatGptCodexAdapter: AgentAdapter = {
       "waiting-for-review",
       "Hooks are installed but not yet trusted. Open ChatGPT Settings → Hooks / Review hooks, then verify a new local Codex thread.",
     );
+    if ((await this.detectStatus(selection, context)) !== "connected") {
+      return result;
+    }
+    const message = "Codex hooks are installed and trusted.";
+    return {
+      ...result,
+      state: "connected",
+      message,
+      preview: { ...result.preview, message },
+    };
   },
 
   async disconnect(selection, context) {
@@ -182,7 +185,7 @@ export const chatGptCodexAdapter: AgentAdapter = {
     ) {
       return "not-connected";
     }
-    return (await context.isCodexHookTrusted?.(command))
+    return (await context.isCodexHookTrusted?.(command, target.configPath))
       ? "connected"
       : "waiting-for-review";
   },

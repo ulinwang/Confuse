@@ -1,4 +1,6 @@
+import { join } from "node:path";
 import { createAgentContext } from "./agents/context";
+import { createCodexTrustChecker } from "./agents/codex-trust";
 import { readSupervisorConfig } from "./config";
 import { MacOsKeychain } from "./keychain";
 import { LaunchAgentManager } from "./launch-agent";
@@ -31,12 +33,23 @@ async function main(): Promise<void> {
       process.exitCode = exitCode;
     },
   });
+  const agentContext = createAgentContext({
+    transport: { type: "unix-socket", socketPath: config.socketPath },
+  });
+  const checkCodexTrust = createCodexTrustChecker(agentContext);
+  const sourcePath = join(
+    agentContext.env.CODEX_HOME ?? join(agentContext.homeDir, ".codex"),
+    "hooks.json",
+  );
+  agentContext.isCodexHookTrusted = (
+    command: string,
+    actualSourcePath?: string,
+  ) => checkCodexTrust(command, actualSourcePath ?? sourcePath);
   supervisor.setAgentAdapter(
     new DesktopAgentRuntimeAdapter({
-      context: createAgentContext({
-        transport: { type: "unix-socket", socketPath: config.socketPath },
-      }),
+      context: agentContext,
       store: supervisor.store,
+      jobs: supervisor.jobs,
       onEnqueued: () => void supervisor.outbox.flush(),
     }),
   );

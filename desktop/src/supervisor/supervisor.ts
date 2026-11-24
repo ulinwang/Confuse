@@ -1,5 +1,7 @@
+import { join } from "node:path";
 import type { AgentRuntimeAdapter } from "./adapters";
 import { createAgentContext } from "./agents/context";
+import { createCodexTrustChecker } from "./agents/codex-trust";
 import type { AgentContext } from "./agents/types";
 import { ComposeManager } from "./compose";
 import { ensurePrivateDirectory, type SupervisorConfig } from "./config";
@@ -20,6 +22,7 @@ export interface SupervisorDependencies {
   secrets?: SecretStore;
   fetch?: typeof fetch;
   agentContext?: Partial<AgentContext>;
+  waitingCodexJobPollMs?: number;
   onStopped?: (exitCode: number) => void;
 }
 
@@ -38,6 +41,10 @@ export class Supervisor {
   private runtimePromise?: Promise<void>;
   private stopPromise?: Promise<void>;
   private quitPromise?: Promise<void>;
+  private agentAdapter?: DesktopAgentRuntimeAdapter;
+  private waitingCodexJobTimer?: NodeJS.Timeout;
+  private readonly waitingCodexJobPollMs: number;
+  private started = false;
   private stopping = false;
 
   constructor(
@@ -45,6 +52,7 @@ export class Supervisor {
     dependencies: SupervisorDependencies = {},
   ) {
     ensurePrivateDirectory(config.stateDir);
+    this.waitingCodexJobPollMs = dependencies.waitingCodexJobPollMs ?? 5_000;
     const runner = dependencies.runner ?? new NodeProcessRunner();
     const secrets = dependencies.secrets ?? new MacOsKeychain(runner);
     this.onStopped = dependencies.onStopped;
@@ -73,11 +81,24 @@ export class Supervisor {
         socketPath: config.socketPath,
       },
     });
+    if (agentContext.isCodexHookTrusted === undefined) {
+      const checkCodexTrust = createCodexTrustChecker(agentContext);
+      const sourcePath = join(
+        agentContext.env.CODEX_HOME ?? join(agentContext.homeDir, ".codex"),
+        "hooks.json",
+      );
+      agentContext.isCodexHookTrusted = (
+        command: string,
+        actualSourcePath?: string,
+      ) => checkCodexTrust(command, actualSourcePath ?? sourcePath);
+    }
     const agentAdapter = new DesktopAgentRuntimeAdapter({
       context: agentContext,
       store: this.store,
+      jobs: this.jobs,
       onEnqueued: () => void this.outbox.flush(),
     });
+    this.agentAdapter = agentAdapter;
     this.router = new SupervisorRouter(this.store, this.jobs, this.events, () =>
       this.quit(),
     );
@@ -91,12 +112,16 @@ export class Supervisor {
   }
 
   setAgentAdapter(adapter: AgentRuntimeAdapter): void {
+    this.stopWaitingCodexJobResume();
     this.router.setAgentAdapter(adapter);
+    this.agentAdapter =
+      adapter instanceof DesktopAgentRuntimeAdapter ? adapter : undefined;
     this.socket.setAgentEventHandler(
       adapter instanceof DesktopAgentRuntimeAdapter
         ? (payload) => adapter.ingestLiveEvent(payload)
         : undefined,
     );
+    if (this.started) this.startWaitingCodexJobResume();
   }
 
   setOutboxDispatcher(
@@ -112,9 +137,26 @@ export class Supervisor {
 
   async start(options: { runtime?: boolean } = {}): Promise<void> {
     await this.socket.listen();
+    this.started = true;
     this.jobs.start();
     this.outbox.start();
+    this.startWaitingCodexJobResume();
     if (options.runtime !== false) this.runtimePromise = this.startRuntime();
+  }
+
+  private startWaitingCodexJobResume(): void {
+    if (this.waitingCodexJobTimer || !this.agentAdapter) return;
+    const adapter = this.agentAdapter;
+    void adapter.resumeWaitingCodexJobs();
+    this.waitingCodexJobTimer = setInterval(() => {
+      void adapter.resumeWaitingCodexJobs();
+    }, this.waitingCodexJobPollMs);
+    this.waitingCodexJobTimer.unref();
+  }
+
+  private stopWaitingCodexJobResume(): void {
+    if (this.waitingCodexJobTimer) clearInterval(this.waitingCodexJobTimer);
+    this.waitingCodexJobTimer = undefined;
   }
 
   private async startRuntime(): Promise<void> {
@@ -164,6 +206,8 @@ export class Supervisor {
 
   private async performQuit(): Promise<void> {
     this.stopping = true;
+    this.started = false;
+    this.stopWaitingCodexJobResume();
     this.startupAbort.abort();
     this.changeRuntime("stopped");
     await this.runtimePromise?.catch(() => undefined);
@@ -199,6 +243,8 @@ export class Supervisor {
 
   private async performStop(stopCompose: boolean): Promise<void> {
     this.stopping = true;
+    this.started = false;
+    this.stopWaitingCodexJobResume();
     this.startupAbort.abort();
     this.changeRuntime("stopped");
     await this.runtimePromise?.catch(() => undefined);
