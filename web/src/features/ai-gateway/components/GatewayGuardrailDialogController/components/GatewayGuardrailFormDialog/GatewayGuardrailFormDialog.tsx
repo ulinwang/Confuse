@@ -34,6 +34,7 @@ import {
   GATEWAY_GUARDRAIL_PRESET_LABELS,
   type GatewayGuardrailTemplateKind,
 } from "@/src/features/ai-gateway/components/GatewayGuardrailDialogController/constants/gatewayGuardrailTemplates";
+import { RegionSelect } from "@/src/features/ai-gateway/components/RegionSelect";
 import { bedrockRegionGroups } from "@/src/features/ai-gateway/constants/bedrockRegions";
 import {
   GATEWAY_GUARDRAIL_ACTION_LABELS,
@@ -66,23 +67,6 @@ const ACTION_OPTIONS: Array<{
 }));
 
 const RUNS_ON_OPTIONS = [{ value: "input", label: "Input" }] as const;
-
-const BEDROCK_REGION_SELECT_OPTIONS = bedrockRegionGroups.map((group) => ({
-  type: "group" as const,
-  id: group.label,
-  label: group.label,
-  options: group.regions.map((region) => ({
-    value: region.value,
-    label: region.label,
-    badges: [{ text: region.value, color: "filled" as const }],
-  })),
-}));
-
-const KNOWN_BEDROCK_REGION_VALUES = new Set(
-  bedrockRegionGroups.flatMap((group) =>
-    group.regions.map((region) => region.value),
-  ),
-);
 
 const BEDROCK_API_KEY_DESCRIPTION = [
   { type: "text", text: "Use " },
@@ -301,7 +285,6 @@ export function GatewayGuardrailFormDialog({
   const selectedPresets = form.watch("presets");
   const secretPrefixes = form.watch("secretPrefixes");
   const containsText = form.watch("containsText");
-  const bedrockRegion = form.watch("bedrockRegion");
   const parsedContains = useMemo(
     () =>
       templateKind === "contains" ? parseContainsWordsText(containsText) : [],
@@ -457,7 +440,6 @@ export function GatewayGuardrailFormDialog({
                     selectedPresets={selectedPresets}
                     secretPrefixes={secretPrefixes}
                     containsEntryCount={parsedContains.length}
-                    bedrockRegion={bedrockRegion}
                     hasSavedApiKey={hasSavedApiKey}
                     presetErrorMessage={
                       form.formState.errors.presets?.message ??
@@ -598,7 +580,6 @@ type TemplateRuleFieldsProps = {
   selectedPresets: readonly GatewayGuardrailPreset[];
   secretPrefixes: readonly string[];
   containsEntryCount: number;
-  bedrockRegion: string;
   hasSavedApiKey: boolean;
   presetErrorMessage?: string;
   onPresetsChange: (presets: GatewayGuardrailPreset[]) => void;
@@ -612,7 +593,6 @@ function TemplateRuleFields({
   selectedPresets,
   secretPrefixes,
   containsEntryCount,
-  bedrockRegion,
   hasSavedApiKey,
   presetErrorMessage,
   onPresetsChange,
@@ -622,7 +602,6 @@ function TemplateRuleFields({
     return (
       <BedrockGuardrailFields
         control={control}
-        currentRegion={bedrockRegion}
         hasSavedApiKey={hasSavedApiKey}
       />
     );
@@ -659,26 +638,13 @@ function TemplateRuleFields({
 
 type BedrockGuardrailFieldsProps = {
   control: Control<GuardrailFormSchemaValues>;
-  currentRegion: string;
   hasSavedApiKey: boolean;
 };
 
 function BedrockGuardrailFields({
   control,
-  currentRegion,
   hasSavedApiKey,
 }: BedrockGuardrailFieldsProps) {
-  const regionOptions = useMemo(() => {
-    const trimmed = currentRegion.trim();
-    if (!trimmed || KNOWN_BEDROCK_REGION_VALUES.has(trimmed)) {
-      return BEDROCK_REGION_SELECT_OPTIONS;
-    }
-    return [
-      { value: trimmed, label: trimmed },
-      ...BEDROCK_REGION_SELECT_OPTIONS,
-    ];
-  }, [currentRegion]);
-
   return (
     <>
       <FormField
@@ -719,18 +685,15 @@ function BedrockGuardrailFields({
 
         <FormField control={control} name="bedrockRegion" label="AWS region">
           {({ id, inputDescribedById, error, value, onChange, onBlur }) => (
-            <SelectInput
+            <RegionSelect
               id={id}
               aria-describedby={inputDescribedById}
               aria-invalid={Boolean(error)}
               error={Boolean(error)}
-              placeholder="Select a region"
-              emptyMessage="No matching region"
-              search={{ placeholder: "Search regions" }}
+              groups={bedrockRegionGroups}
               value={value}
-              onValueChange={onChange}
+              onChange={onChange}
               onBlur={onBlur}
-              options={regionOptions}
             />
           )}
         </FormField>
