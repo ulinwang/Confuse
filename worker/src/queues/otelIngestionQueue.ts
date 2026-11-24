@@ -983,7 +983,8 @@ export const otelIngestionQueueProcessorBuilder = (
             "OTEL resource spans missing for TypeScript processing",
           );
         }
-        return processOtelEvents({
+        // The JSON writer owns a process-wide flush timer. Initialize it outside the sampled batch.
+        const params = {
           processor,
           resourceSpans: parsedSpans,
           ingestionService: getIngestionService(),
@@ -993,12 +994,12 @@ export const otelIngestionQueueProcessorBuilder = (
           earlyBatch,
           mediaPath,
           inputByteLength,
-        });
+        };
+        return sample && directWrite
+          ? otelProcessingHooks.run(sample.primary, processOtelEvents, params)
+          : processOtelEvents(params);
       };
-      const directMediaPresence = await otelProcessingHooks.run(
-        directWrite ? sample?.primary : undefined,
-        processDirectOtelBatch,
-      );
+      const directMediaPresence = await processDirectOtelBatch();
       if (directMediaPresence) {
         mediaPresence = combineOtelMediaPresence(
           mediaPresence,

@@ -29,6 +29,7 @@ import * as masking from "@langfuse/shared/src/server/ee/ingestionMasking";
 import * as otelPreparation from "../features/otel-ingestion/prepareOtelBatch";
 import { initializeEventByteAccounting } from "../services/ClickhouseWriter/eventByteAccounting";
 import { ClickhouseWriter } from "../services/ClickhouseWriter";
+import { otelProcessingHooks } from "../features/otel-ingestion/processingHooks";
 import {
   comparableOtelReplayRows,
   expectRawNativeParity,
@@ -3257,6 +3258,13 @@ describe(
         useProductionModelLookup();
         const project =
           writeMode === "dual" ? await createOrgProjectAndApiKey() : undefined;
+        const sharedWriter = ClickhouseWriter.getInstance;
+        const startup = vi
+          .spyOn(ClickhouseWriter, "getInstance")
+          .mockImplementation((client) => {
+            expect(otelProcessingHooks.getStore()).toBeUndefined();
+            return sharedWriter(client);
+          });
         try {
           const result = await sample({
             mode,
@@ -3310,6 +3318,7 @@ describe(
             }
           }
         } finally {
+          startup.mockRestore();
           if (project) {
             await prisma.project.delete({ where: { id: project.projectId } });
             await prisma.organization.delete({ where: { id: project.orgId } });
