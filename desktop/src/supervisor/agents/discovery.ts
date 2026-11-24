@@ -3,6 +3,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
+import { decode } from "he";
 import type { AgentContext } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -47,15 +48,6 @@ export async function readCliVersion(
   }
 }
 
-function decodeXml(value: string): string {
-  return value
-    .replaceAll("&amp;", "&")
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&apos;", "'");
-}
-
 export async function readBundleMetadata(appPath: string): Promise<{
   bundleId?: string;
   version?: string;
@@ -66,10 +58,12 @@ export async function readBundleMetadata(appPath: string): Promise<{
       "utf8",
     );
     const readKey = (key: string): string | undefined => {
-      const match = plist.match(
-        new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`),
-      );
-      return match?.[1] === undefined ? undefined : decodeXml(match[1]);
+      for (const match of plist.matchAll(
+        /<key>([^<]+)<\/key>\s*<string>([^<]*)<\/string>/g,
+      )) {
+        if (decode(match[1]) === key) return decode(match[2]);
+      }
+      return undefined;
     };
     return {
       bundleId: readKey("CFBundleIdentifier"),

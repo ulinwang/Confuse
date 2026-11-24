@@ -9,17 +9,14 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { escape } from "he";
 import { ensurePrivateDirectory, type SupervisorConfig } from "./config";
 import type { ProcessRunner } from "./process";
 
 export const LAUNCH_AGENT_LABEL = "com.confuse.supervisor";
 
 function xml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
+  return escape(value);
 }
 
 export class LaunchAgentManager {
