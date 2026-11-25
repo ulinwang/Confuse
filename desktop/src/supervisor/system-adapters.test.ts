@@ -191,6 +191,7 @@ describe("system adapters", () => {
       runner,
       process.getuid(),
       join(stateDir, "com.confuse.supervisor.plist"),
+      "darwin",
     );
 
     await expect(manager.uninstall()).rejects.toThrow("Input/output error");
@@ -225,6 +226,7 @@ describe("system adapters", () => {
       runner,
       process.getuid(),
       plistPath,
+      "darwin",
     );
     await manager.install();
     const plist = readFileSync(plistPath, "utf8");
