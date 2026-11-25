@@ -6,6 +6,7 @@
 export const PATH_CONSTANTS = {
   withoutNavigation: [
     "/onboarding",
+    "/desktop-onboarding",
     "/auth/reset-password",
     "/auth/setup-password",
   ] as const,

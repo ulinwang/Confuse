@@ -1,3 +1,11 @@
+# Confuse
+
+Confuse is a macOS desktop fork of Langfuse that discovers local coding Agents, connects their live and optional historical sessions to a private Langfuse instance, and keeps ingestion running in a supervised background process. The desktop app supports Kimi Code, ChatGPT desktop Codex, Claude Code, and DeepSeek Harness, with a first-run setup guide and a persistent notification center.
+
+See [`desktop/README.md`](desktop/README.md) for desktop development, packaging, and release instructions. The upstream Langfuse documentation and license notices are retained below.
+
+---
+
 <img width="2400" height="600" alt="Langfuse by ClickHouse" src=".github/readme-banner.png" />
 
 <div align="center">

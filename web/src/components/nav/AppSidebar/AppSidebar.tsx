@@ -20,7 +20,7 @@ import Link from "next/link";
 import { LangfuseLogo } from "@/src/components/design-system/LangfuseLogo/LangfuseLogo";
 import { LangfuseIcon } from "@/src/components/design-system/LangfuseIcon/LangfuseIcon";
 import { type RouteGroup } from "@/src/components/layouts/routes";
-import { ExternalLink, Grid2X2 } from "@langfuse/icons";
+import { Bell, ExternalLink, Grid2X2 } from "@langfuse/icons";
 import { DropdownIndicator } from "@/src/components/design-system/DropdownIndicator/DropdownIndicator";
 import { VERSION } from "@/src/constants/VERSION";
 import {
@@ -63,6 +63,8 @@ import {
   APP_SHELL_CHROME_ROW_TEST_ID,
 } from "@/src/components/layouts/app-shell-chrome";
 import { cn } from "@/src/utils/tailwind";
+import { NotificationCenter } from "@/src/features/notification-center/NotificationCenter";
+import { useConfuseDesktopAvailability } from "@/src/features/notification-center/bridge";
 
 type SidebarUser = {
   name: string;
@@ -134,6 +136,7 @@ function AppSidebarRoot({
   const activeNotifications = !v4UpgradeUiEnabled
     ? getActiveSidebarNotifications(notificationState.dismissedIds)
     : [];
+  const isConfuseDesktop = useConfuseDesktopAvailability();
 
   return (
     <Sidebar collapsible="icon" variant="sidebar">
@@ -210,6 +213,34 @@ function AppSidebarRoot({
         <NavMain items={secondaryNavItems} />
       </SidebarContent>
       <SidebarFooter>
+        {isConfuseDesktop && (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <NotificationCenter>
+                {({ unreadCount, Trigger }) => (
+                  <Trigger asChild>
+                    <SidebarMenuButton
+                      tooltip="Notifications"
+                      aria-label={
+                        unreadCount > 0
+                          ? `Notifications, ${unreadCount} unread`
+                          : "Notifications"
+                      }
+                    >
+                      <Bell size="base" />
+                      <span>Notifications</span>
+                      {unreadCount > 0 && (
+                        <span className="bg-destructive text-destructive-foreground ml-auto rounded-full px-1.5 text-xs group-data-[collapsible=icon]:hidden">
+                          {unreadCount > 99 ? "99+" : unreadCount}
+                        </span>
+                      )}
+                    </SidebarMenuButton>
+                  </Trigger>
+                )}
+              </NotificationCenter>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        )}
         <NavUser
           user={user}
           items={userMenuItems}
