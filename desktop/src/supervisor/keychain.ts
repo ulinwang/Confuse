@@ -63,7 +63,7 @@ export class MacOsKeychain implements SecretStore {
   async set(key: SecretKey, value: string): Promise<void> {
     const encoded = Buffer.from(value, "utf8").toString("base64");
     await this.runner.run("/usr/bin/security", ["-i"], {
-      input: `add-generic-password -U -a "${key}" -s "${this.service}" -w ${encoded}\nexit\n`,
+      input: `add-generic-password -U -a "${key}" -s "${this.service}" -w ${encoded}\n`,
     });
   }
 }
