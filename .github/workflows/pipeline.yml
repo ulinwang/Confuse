@@ -1083,7 +1083,7 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
     name: tests-worker (node${{ matrix.node-version }}, pg${{ matrix.postgres-version }}, mode${{ matrix.deploy-mode }})
     env:
-      VITEST_MAX_WORKERS: "8"
+      VITEST_MAX_WORKERS: ${{ github.repository == 'langfuse/langfuse' && '8' || '4' }}
       NODE_ENV: test
     strategy:
       fail-fast: false
