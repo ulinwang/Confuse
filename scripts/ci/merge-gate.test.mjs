@@ -128,7 +128,7 @@ test("changed-file provider selection permits only explicit exclusions", () => {
   );
 });
 
-test("fork pull requests may skip the secret-bearing provider jobs", () => {
+test("forks may skip only the secret-bearing provider jobs", () => {
   const needs = successfulJobs();
   needs["llm-connections-filter"] = {
     result: "success",
@@ -153,6 +153,27 @@ test("fork pull requests may skip the secret-bearing provider jobs", () => {
       job,
     );
     needs[job] = { result: "success" };
+  }
+  for (const [event, ref] of [
+    ["workflow_dispatch", "refs/heads/feature"],
+    ["push", "refs/tags/v4.1.0"],
+  ]) {
+    for (const job of ["test-worker-llm-connections", "test-ai-gateway-e2e"]) {
+      needs[job] = { result: "skipped" };
+    }
+    assert.deepEqual(
+      evaluateGate({ event, ref, needs, fork: true }),
+      [],
+      `${event} on a fork`,
+    );
+    assert.notEqual(
+      evaluateGate({ event, ref, needs }).length,
+      0,
+      `${event} on upstream`,
+    );
+    needs["tests-web"] = { result: "skipped" };
+    assert.notEqual(evaluateGate({ event, ref, needs, fork: true }).length, 0);
+    needs["tests-web"] = { result: "success" };
   }
 });
 

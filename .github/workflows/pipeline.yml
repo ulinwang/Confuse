@@ -1870,7 +1870,7 @@ jobs:
         id: set-success-output
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_FORK: ${{ github.repository != 'langfuse/langfuse' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         run: node scripts/ci/merge-gate.mjs
 
   # The alert lives in its own job because only a job-level `cancelled()` tells
