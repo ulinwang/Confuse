@@ -52,6 +52,11 @@ function isDuplicatePush(event, needs) {
 
 function allowedFilteredSkips(event, ref, needs, fork) {
   const allowedSkips = new Set();
+  if (fork) {
+    allowedSkips.add("test-worker-llm-connections");
+    allowedSkips.add("test-ai-gateway-e2e");
+    return allowedSkips;
+  }
   if (
     !["pull_request", "merge_group", "push"].includes(event) ||
     ref.startsWith("refs/tags/")
@@ -69,10 +74,6 @@ function allowedFilteredSkips(event, ref, needs, fork) {
       allowedSkips.add(job);
     }
   }
-  if (event === "pull_request" && fork) {
-    allowedSkips.add("test-worker-llm-connections");
-    allowedSkips.add("test-ai-gateway-e2e");
-  }
   return allowedSkips;
 }
 
@@ -82,6 +83,7 @@ function missingRequiredJobs(needs, allowedSkips, duplicate, ref) {
     const result = needs[name]?.result;
     if (result === "success") continue;
     const requiredOnTag =
+      !allowedSkips.has(name) &&
       ref.startsWith("refs/tags/") &&
       ["test-worker-llm-connections", "test-ai-gateway-e2e"].includes(name);
     if (

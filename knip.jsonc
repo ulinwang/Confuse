@@ -20,6 +20,22 @@
         // The workspace launcher uses Turbo; shipped images start Node directly.
         "ignoreBinaries": ["change", "turbo!"],
     },
+    "desktop": {
+      // Forge loads this maker from the package name in forge.config.ts.
+      "ignoreDependencies": ["@electron-forge/maker-dmg"],
+      "ignoreIssues": {
+        // The LaunchAgent label is only shared by its plist path and launchctl domain.
+        "src/supervisor/launch-agent.ts": ["exports"],
+      },
+      "entry": [
+        // Electron Forge loads its configuration and makers by filename.
+        "forge.config.ts",
+        // These source files are bundled directly by scripts/build.mjs.
+        "src/main/index.ts!",
+        "src/preload/index.ts!",
+        "src/supervisor/index.ts!",
+      ],
+    },
     "packages/native": {
       "entry": [
         // The public types re-export the declarations paired with the generated JS loader.

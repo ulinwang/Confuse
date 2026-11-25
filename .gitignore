@@ -25,6 +25,7 @@ next-env.d.ts
 
 # production
 /build
+desktop/out/
 
 # claude worktrees
 .claude/worktrees

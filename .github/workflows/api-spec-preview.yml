@@ -11,15 +11,19 @@ concurrency:
   group: api-spec-preview-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: ${{ github.event.action != 'labeled' || github.event.label.name == 'api-spec' }}
 
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
 jobs:
   deploy:
     name: Deploy API spec preview
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.repository == 'langfuse/langfuse' &&
+      (github.event_name == 'workflow_dispatch' ||
       (contains(github.event.pull_request.labels.*.name, 'api-spec') &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      (github.event.action != 'labeled' || github.event.label.name == 'api-spec'))
+      (github.event.action != 'labeled' || github.event.label.name == 'api-spec')))
     permissions:
       contents: read
       issues: write

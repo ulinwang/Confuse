@@ -250,7 +250,10 @@ ENV NEXT_MANUAL_SIG_HANDLE true
 # set the CI flag to true to get CI specific logs
 ENV CI true
 
-RUN NODE_OPTIONS='--max-old-space-size-percentage=75' turbo run build --filter=web...
+ARG NODE_BUILD_OPTIONS=--max-old-space-size-percentage=75
+ARG CONFUSE_BUILD_WORKERS
+ENV CONFUSE_BUILD_WORKERS=$CONFUSE_BUILD_WORKERS
+RUN NODE_OPTIONS="$NODE_BUILD_OPTIONS" turbo run build --filter=web...
 
 # Next copies .next/server/pages into the standalone output wholesale, including
 # the *.nft.json build traces (~300MB) that server.js never reads.

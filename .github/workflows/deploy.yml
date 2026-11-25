@@ -39,7 +39,7 @@ concurrency:
 name: Deploy to ECS
 jobs:
   affected-services:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     outputs:
       services: ${{ steps.affected-services.outputs.result }}
     steps:
@@ -69,7 +69,7 @@ jobs:
             console.log('Services', `${process.env.services}` ?? 'n/a');
 
   affected-environments:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     outputs:
       environments: ${{ steps.affected-environments.outputs.result }}
     steps:
@@ -123,7 +123,7 @@ jobs:
   notify-slack-on-failure:
     needs: [affected-services, affected-environments, ecs-deploy]
     if: failure()
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       actions: read

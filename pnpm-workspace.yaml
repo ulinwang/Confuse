@@ -2,6 +2,7 @@ packages:
   # include packages in subfolders (e.g. apps/ and packages/)
   - "web"
   - "worker"
+  - "desktop"
   - "ai-gateway"
   - "packages/**"
   - "ee"
@@ -118,6 +119,10 @@ packageExtensions:
     dependencies:
       typescript: npm:@typescript/typescript6@^6.0.2
 allowBuilds:
+  electron: true
+  fs-xattr: true
+  koffi: true
+  macos-alias: true
   "@prisma/client": true
   "@prisma/engines": true
   "@sentry/cli": true
@@ -161,6 +166,8 @@ overrides:
   browserslist: 4.28.7
   postcss: 8.5.25
   esbuild: "0.28.1"
+  # Use Electron's published node-gyp fork instead of rebuild 3.x's pinned Git dependency.
+  "@electron/rebuild>@electron/node-gyp": 10.2.0-electron.2
   # Keep both installed majors on their security-patched releases.
   "undici@6": 6.29.1
   "undici@7": 7.30.2

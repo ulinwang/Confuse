@@ -29,10 +29,13 @@ concurrency:
   group: build-sandbox-microvm-image
   cancel-in-progress: false
 
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
 jobs:
   build:
     name: Build & Publish (${{ matrix.environment }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 60
     environment: ${{ matrix.environment }}
     permissions:

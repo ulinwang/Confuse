@@ -95,6 +95,7 @@ and a concrete next step when handed a link. Keep answers short. Handbook:
 ```text
 langfuse/
 |- web/                     # Next.js app (UI + tRPC + public REST)
+|- desktop/                 # Confuse Electron shell, supervisor, Agent connectors
 |- worker/                  # Queue consumers and background processing
 |- packages/shared/         # Shared domain, DB, queue contracts, repositories
 |- packages/native/         # Rust addon (napi-rs) loaded in-process by worker

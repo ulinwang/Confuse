@@ -25,6 +25,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
   # Keep the test job node-version matrices in sync. GitHub does not allow the
   # env context in jobs.<job_id>.name, so matrix jobs use matrix.node-version
   # for their display names.
@@ -45,7 +46,7 @@ env:
 jobs:
   validate-v3-release-tag:
     if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && (github.ref_name == 'v3' || startsWith(github.ref_name, 'v3.')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -68,7 +69,7 @@ jobs:
   # it instantly and their jobs start without waiting for it (~45-100s of
   # wall clock per run).
   pre-job:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     if: github.event_name == 'push'
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
@@ -129,7 +130,7 @@ jobs:
           fi
 
   llm-connections-filter:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     outputs:
       llm_connections: ${{ steps.range.outputs.run_all == 'true' || steps.filter.outputs.llm_connections }}
       topics_llm: ${{ steps.range.outputs.run_all == 'true' || steps.filter.outputs.topics_llm }}
@@ -164,7 +165,7 @@ jobs:
 
   tests-ai-gateway:
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
@@ -207,7 +208,7 @@ jobs:
 
   lint:
     timeout-minutes: 12
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -281,7 +282,7 @@ jobs:
   typecheck:
     name: typecheck and native checks
     timeout-minutes: 12
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -339,7 +340,7 @@ jobs:
         run: pnpm run typecheck --filter=!ai-gateway
 
   knip:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -374,7 +375,7 @@ jobs:
         run: pnpm exec knip
 
   format-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -432,7 +433,7 @@ jobs:
           fi
 
   tests-eslint-plugin:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -469,7 +470,7 @@ jobs:
         run: pnpm --filter @repo/eslint-plugin run test
 
   tests-in-app-agent-sandbox-runtime:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 15
     needs:
       - pre-job
@@ -517,7 +518,7 @@ jobs:
         run: pnpm --filter @repo/in-app-agent-sandbox-runtime run test:e2e
 
   tests-storybook:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -573,7 +574,7 @@ jobs:
   build-storybook:
     # Kept apart from tests-storybook so the static build and the Vitest
     # browser run, which do not depend on each other, run in parallel.
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
@@ -616,7 +617,7 @@ jobs:
 
   tests-shared:
     timeout-minutes: 15
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -720,11 +721,11 @@ jobs:
         include:
           - component: web
             service: langfuse-web
-            runner: blacksmith-8vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
             health_url: http://localhost:3000/api/public/health
           - component: worker
             service: langfuse-worker
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
             health_url: http://localhost:3030/api/health
     steps:
       - name: Checkout
@@ -844,7 +845,7 @@ jobs:
           if-no-files-found: ignore
   tests-web:
     timeout-minutes: 30
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1031,7 +1032,7 @@ jobs:
 
   tests-web-client:
     timeout-minutes: 10
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
@@ -1073,7 +1074,7 @@ jobs:
 
   tests-worker:
     timeout-minutes: 20
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1082,7 +1083,7 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
     name: tests-worker (node${{ matrix.node-version }}, pg${{ matrix.postgres-version }}, mode${{ matrix.deploy-mode }})
     env:
-      VITEST_MAX_WORKERS: "8"
+      VITEST_MAX_WORKERS: ${{ github.repository == 'langfuse/langfuse' && '8' || '4' }}
       NODE_ENV: test
     strategy:
       fail-fast: false
@@ -1219,10 +1220,10 @@ jobs:
       matrix:
         include:
           - suite: web
-            runner: blacksmith-16vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-16vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
             max-workers: "12"
           - suite: worker
-            runner: blacksmith-8vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
             max-workers: "4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1328,12 +1329,12 @@ jobs:
 
   test-worker-llm-connections:
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
       - llm-connections-filter
-    # Fork pull requests get no provider secrets, so the live suites cannot run there.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.llm_connections == 'true' || needs.llm-connections-filter.outputs.topics_llm == 'true' || github.event_name == 'workflow_dispatch'))) }}
+    # Live provider suites require Langfuse's provider credentials.
+    if: ${{ !cancelled() && github.repository == 'langfuse/langfuse' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.llm_connections == 'true' || needs.llm-connections-filter.outputs.topics_llm == 'true' || github.event_name == 'workflow_dispatch'))) }}
     name: test-worker-llm-connections (node24, pg15)
     env:
       NODE_ENV: test
@@ -1425,7 +1426,7 @@ jobs:
           LANGFUSE_LLM_CONNECTION_GOOGLEAISTUDIO_KEY: ${{ secrets.LANGFUSE_LLM_CONNECTION_GOOGLEAISTUDIO_KEY }}
 
   e2e-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1566,7 +1567,7 @@ jobs:
           if-no-files-found: ignore
 
   e2e-server-tests:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1701,11 +1702,11 @@ jobs:
 
   test-ai-gateway-e2e:
     timeout-minutes: 25
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-8vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       - pre-job
       - llm-connections-filter
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.ai_gateway == 'true' || github.event_name == 'workflow_dispatch'))) }}
+    if: ${{ !cancelled() && github.repository == 'langfuse/langfuse' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.ai_gateway == 'true' || github.event_name == 'workflow_dispatch'))) }}
     name: test-ai-gateway-e2e
     env:
       NODE_ENV: test
@@ -1831,7 +1832,7 @@ jobs:
 
   all-ci-passed:
     # This allows us to have a branch protection rule for tests and deploys with matrix
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     needs:
       [
         pre-job,
@@ -1869,7 +1870,7 @@ jobs:
         id: set-success-output
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_FORK: ${{ github.repository != 'langfuse/langfuse' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
         run: node scripts/ci/merge-gate.mjs
 
   # The alert lives in its own job because only a job-level `cancelled()` tells
@@ -1879,7 +1880,7 @@ jobs:
   notify-ci-failure:
     needs: all-ci-passed
     if: ${{ !cancelled() && needs.all-ci-passed.result == 'failure' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v3' || startsWith(github.ref, 'refs/tags/')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       actions: read
@@ -1909,28 +1910,28 @@ jobs:
             dockerfile: ./web/Dockerfile
             platform: linux/amd64
             platform_tag: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
           - component: web
             image_name: langfuse
             context: .
             dockerfile: ./web/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
           - component: worker
             image_name: langfuse-worker
             context: .
             dockerfile: ./worker/Dockerfile
             platform: linux/amd64
             platform_tag: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
           - component: worker
             image_name: langfuse-worker
             context: .
             dockerfile: ./worker/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
           # The gateway crate is its own build context (ai-gateway/.dockerignore).
           - component: ai-gateway
             image_name: ai-gateway
@@ -1938,14 +1939,14 @@ jobs:
             dockerfile: ./ai-gateway/Dockerfile
             platform: linux/amd64
             platform_tag: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
           - component: ai-gateway
             image_name: ai-gateway
             context: ./ai-gateway
             dockerfile: ./ai-gateway/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
     runs-on: ${{ matrix.runner }}
     # publish-docker-image-release is gated on this whole matrix succeeding, so
     # a failed gateway leg must not fail the job and block web and worker. The
@@ -2113,7 +2114,7 @@ jobs:
             image_name: langfuse-worker
           - component: ai-gateway
             image_name: ai-gateway
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       packages: write
       contents: read
@@ -2263,7 +2264,7 @@ jobs:
       - publish-docker-image-release
     # Job-level `!cancelled()` skips whole-run cancels; see notify-ci-failure.
     if: ${{ !cancelled() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     permissions:
       contents: read
       actions: read

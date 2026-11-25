@@ -1,7 +1,7 @@
 # Require "CLA gate" instead of "license/cla" after deploying this workflow.
 name: CLA gate
-on: # zizmor: ignore[dangerous-triggers] Metadata-only API calls; never checks out or executes PR code.
-  pull_request_target:
+on: # Metadata-only API calls; never checks out or executes PR code.
+  pull_request:
     types: [opened, reopened, synchronize, edited, ready_for_review]
   merge_group:
   status:
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   evaluate:
     if: github.event_name != 'status' || github.event.context == 'license/cla'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-24.04' }}
     timeout-minutes: 3
     permissions:
       contents: read
@@ -38,6 +38,7 @@ jobs:
             await publish("failure", "CLA verification incomplete. Edit PR title/body to retry.");
             /** Fork author attribution does not prove who can push to the branch. */
             let exempt = current.every(pr => pr.head.repo?.full_name === `${owner}/${repo}`);
+            if (github.repository !== "langfuse/langfuse" && exempt) return publish("success", "Same-repository contributors have write access.");
             const checked = new Set([49699333, 41898282, 206951365, 199161495]); // Dependabot, Actions, Cursor.
             for (const pr of current) {
               if (!exempt) break;
