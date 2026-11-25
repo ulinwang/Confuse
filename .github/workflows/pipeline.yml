@@ -1917,7 +1917,7 @@ jobs:
             dockerfile: ./web/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
           - component: worker
             image_name: langfuse-worker
             context: .
@@ -1931,7 +1931,7 @@ jobs:
             dockerfile: ./worker/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
           # The gateway crate is its own build context (ai-gateway/.dockerignore).
           - component: ai-gateway
             image_name: ai-gateway
@@ -1946,7 +1946,7 @@ jobs:
             dockerfile: ./ai-gateway/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ${{ github.repository == 'langfuse/langfuse' && 'blacksmith-4vcpu-ubuntu-2404-arm' || 'ubuntu-24.04-arm' }}
     runs-on: ${{ matrix.runner }}
     # publish-docker-image-release is gated on this whole matrix succeeding, so
     # a failed gateway leg must not fail the job and block web and worker. The
