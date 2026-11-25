@@ -25,6 +25,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
   # Keep the test job node-version matrices in sync. GitHub does not allow the
   # env context in jobs.<job_id>.name, so matrix jobs use matrix.node-version
   # for their display names.

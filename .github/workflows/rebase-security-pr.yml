@@ -12,6 +12,9 @@ concurrency:
   group: security-pr-${{ github.event.issue.number }}-${{ github.event.comment.body == '/rebase-security-pr' }}
   cancel-in-progress: false
 
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
 jobs:
   repair:
     if: >-

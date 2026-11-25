@@ -24,6 +24,7 @@ concurrency:
   group: warm-caches-${{ github.event_name == 'push' && 'push' || 'periodic' }}
 
 env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
   # Keep in sync with NODE_VERSION in pipeline.yml.
   NODE_VERSION: 24
 

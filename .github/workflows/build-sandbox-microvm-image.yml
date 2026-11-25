@@ -29,6 +29,9 @@ concurrency:
   group: build-sandbox-microvm-image
   cancel-in-progress: false
 
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
 jobs:
   build:
     name: Build & Publish (${{ matrix.environment }})

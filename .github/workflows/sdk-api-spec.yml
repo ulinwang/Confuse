@@ -32,6 +32,7 @@ permissions:
 
 # Push runs have no inputs and target the SDK default branches.
 env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
   PYTHON_SDK_BASE_BRANCH: ${{ inputs.python_sdk_base_branch || 'main' }}
   JS_SDK_BASE_BRANCH: ${{ inputs.js_sdk_base_branch || 'main' }}
 

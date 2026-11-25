@@ -11,6 +11,9 @@ concurrency:
   group: api-spec-preview-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: ${{ github.event.action != 'labeled' || github.event.label.name == 'api-spec' }}
 
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
 jobs:
   deploy:
     name: Deploy API spec preview
