@@ -6,6 +6,10 @@ const signingIdentity = process.env.APPLE_SIGNING_IDENTITY;
 const appleId = process.env.APPLE_ID;
 const appleIdPassword = process.env.APPLE_ID_PASSWORD;
 const appleTeamId = process.env.APPLE_TEAM_ID;
+const appleCredentials =
+  signingIdentity && appleId && appleIdPassword && appleTeamId
+    ? { signingIdentity, appleId, appleIdPassword, appleTeamId }
+    : undefined;
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -28,25 +32,23 @@ const config: ForgeConfig = {
       /^\/out(?:\/|$)/,
       /^\/node_modules(?:\/|$)/,
     ],
-    osxSign: signingIdentity
+    osxSign: appleCredentials
       ? {
-          identity: signingIdentity,
+          identity: appleCredentials.signingIdentity,
         }
       : undefined,
-    osxNotarize:
-      signingIdentity && appleId && appleIdPassword && appleTeamId
-        ? {
-            appleId,
-            appleIdPassword,
-            teamId: appleTeamId,
-          }
-        : undefined,
+    osxNotarize: appleCredentials
+      ? {
+          appleId: appleCredentials.appleId,
+          appleIdPassword: appleCredentials.appleIdPassword,
+          teamId: appleCredentials.appleTeamId,
+        }
+      : undefined,
   },
   makers: [
     {
       name: "@electron-forge/maker-dmg",
       config: {
-        name: "Confuse",
         title: "Confuse",
         format: "ULFO",
         overwrite: true,

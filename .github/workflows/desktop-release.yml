@@ -76,6 +76,10 @@ jobs:
           password: ${{ github.token }}
       - name: Build and publish multi-architecture images
         run: node desktop/scripts/build-images.mjs --push --tag "$CONFUSE_RELEASE_VERSION"
+      - name: Make packages public and verify anonymous pulls
+        env:
+          GHCR_VISIBILITY_TOKEN: ${{ github.token }}
+        run: node desktop/scripts/publish-ghcr.mjs
 
   test:
     runs-on: ubuntu-24.04
@@ -101,14 +105,35 @@ jobs:
     needs: [prepare, images, test]
     runs-on: macos-14
     permissions:
-      contents: write
+      contents: read
     env:
       RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    outputs:
+      signed: ${{ steps.artifact-mode.outputs.signed }}
+      artifact_name: ${{ steps.artifact-mode.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - id: artifact-mode
+        name: Select signed release or unsigned CI artifact mode
+        run: |
+          mkdir -p desktop/out
+          if [[ -n "$APPLE_SIGNING_IDENTITY" && -n "$APPLE_ID" && -n "$APPLE_ID_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=desktop-dmg-$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Signed and notarized release candidate" > desktop/out/artifact-kind.txt
+          else
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "artifact_name=desktop-dmg-unsigned-$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            echo "UNSIGNED CI ARTIFACT: not signed, not notarized, and not a formal GitHub release" > desktop/out/artifact-kind.txt
+            echo "::warning::Apple signing/notarization credentials are incomplete. Building unsigned CI artifacts only; no GitHub release will be created."
+          fi
       - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
         with:
           install: false
@@ -118,34 +143,50 @@ jobs:
           node-version: "24"
           package-manager-cache: false
       - run: pnpm install --frozen-lockfile
-      - name: Build macOS DMGs
-        env:
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Build macOS DMGs sequentially
         run: pnpm --filter @confuse/desktop make:mac
-      - name: Upload DMG artifacts
+      - name: Verify exactly one ARM64 and one x64 DMG
+        run: node desktop/scripts/verify-dmgs.mjs
+      - name: Upload DMG CI artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: desktop-dmg-${{ env.RELEASE_VERSION }}
-          path: desktop/out/**/*.dmg
+          name: ${{ steps.artifact-mode.outputs.artifact_name }}
+          path: |
+            desktop/out/**/*.dmg
+            desktop/out/artifact-kind.txt
           if-no-files-found: error
           retention-days: 7
-      - name: Publish GitHub release
+
+  release:
+    needs: [prepare, dmg]
+    if: needs.dmg.outputs.signed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download signed and notarized DMGs
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.dmg.outputs.artifact_name }}
+          path: release
+      - name: Verify release DMGs
+        run: node desktop/scripts/verify-dmgs.mjs release
+      - name: Publish signed GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           artifacts=()
           while IFS= read -r -d '' artifact; do
             artifacts+=("$artifact")
-          done < <(find desktop/out -type f -name '*.dmg' -print0)
-          if (( ${#artifacts[@]} == 0 )); then
-            echo "No DMG artifacts found" >&2
-            exit 1
-          fi
+          done < <(find release -type f -name '*.dmg' -print0)
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
+            gh release upload "$RELEASE_TAG" "${artifacts[@]}"
           else
             gh release create "$RELEASE_TAG" "${artifacts[@]}" \
               --target "$GITHUB_SHA" \

@@ -57,28 +57,33 @@ To publish both images for Linux AMD64 and ARM64, authenticate to GHCR with a to
 pnpm --filter @confuse/desktop run build:images -- --push --tag 0.1.0
 ```
 
+The release workflow uses the repository's `packages: write` permission to PATCH both `confuse-web` and `confuse-worker` to `public` after the first push, then verifies anonymous manifest access and both Linux architectures. A failed PATCH or anonymous check stops the workflow before DMG creation and before any GitHub release.
+
 `make` builds a DMG for the host architecture. To request both macOS architectures:
 
 ```sh
 pnpm --filter @confuse/desktop make:mac
 ```
 
+`make:mac` clears prior Forge maker output, builds ARM64 first and x64 second, and verifies that the only DMGs are `Confuse-<version>-arm64.dmg` and `Confuse-<version>-x64.dmg`. The architecture-specific names prevent one build from overwriting the other.
+
 Artifacts are written under `desktop/out/`. `desktop/resources/`, when present, is copied to the app's resources directory. Compiled `dist/`, runtime `node_modules/`, and `resources/` are also unpacked from ASAR so a LaunchAgent can run `app.asar.unpacked/dist/supervisor/index.mjs` with Electron's bundled Node 24 runtime and resolve `app.asar.unpacked/resources/compose.yml`; the LaunchAgent template must not try to execute code inside `app.asar`.
 
 ## Signing and notarization
 
-Unsigned local builds are the default. Set `APPLE_SIGNING_IDENTITY` to enable signing with Hardened Runtime. Notarization runs only when all of these variables are present:
+Unsigned local builds are the default. Signing with Hardened Runtime and notarization are enabled together only when all of these variables are present:
 
+- `APPLE_SIGNING_IDENTITY`
 - `APPLE_ID`
 - `APPLE_ID_PASSWORD` (an app-specific password)
 - `APPLE_TEAM_ID`
 
-The Forge configuration uses `notarytool`. Stapling and release verification remain release-pipeline steps. Without Apple credentials, validate only the unsigned artifact and do not describe it as signed, notarized, or stapled.
+The Forge configuration uses `notarytool`. Stapling and release verification remain release-pipeline steps. An incomplete credential set produces an unsigned build; validate only that unsigned artifact and do not describe it as signed, notarized, stapled, or formally released.
 
 The LaunchAgent receives only the resolved Web/worker image names, Web/MinIO ports, and resource directory, in addition to its fixed supervisor paths and `ELECTRON_RUN_AS_NODE`. Database credentials, project keys, and the desktop authentication token are never copied into its plist; they remain in Keychain and are supplied only to the Compose child environment.
 
 ## Release workflow
 
-`.github/workflows/desktop-release.yml` runs for `desktop-v*` tags and manual dispatches. The version must match both `desktop/package.json` and the Compose defaults. It pushes the Web and worker images to GHCR for Linux AMD64/ARM64, runs desktop tests, builds ARM64 and x64 macOS DMGs, uploads workflow artifacts, and creates or updates the corresponding GitHub release. Manual dispatches create the release tag at the dispatched commit when necessary.
+`.github/workflows/desktop-release.yml` runs for `desktop-v*` tags and manual dispatches. The version must match both `desktop/package.json` and the Compose defaults. It pushes and publicly verifies the Web and worker images, runs desktop tests, builds and validates exactly one ARM64 and one x64 macOS DMG, and uploads workflow artifacts. Only a complete Apple signing and notarization credential set enables the separate GitHub release job. Manual dispatches create the release tag at the dispatched commit when necessary.
 
-The workflow uses the repository's scoped `github.token` for releases and GHCR packages. It does not use Langfuse deployment or other upstream service secrets. Apple signing and notarization remain optional; when the `APPLE_*` secrets described above are absent, the release contains unsigned DMGs.
+The workflow uses the repository's scoped `github.token` for image pushes, package visibility updates, and signed releases. It does not use Langfuse deployment or other upstream service secrets. When any `APPLE_*` secret described above is absent, it uploads `desktop-dmg-unsigned-<version>` with an explicit `UNSIGNED CI ARTIFACT` marker and does not create or update a GitHub release.
