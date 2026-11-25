@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { createDshPackageVersionPlugin } from "./dsh-package-version.mjs";
+import { nodeEsmBanner } from "./node-esm-banner.mjs";
 
 const desktopRoot = fileURLToPath(new URL("../", import.meta.url));
 const temporaryDirectory = await mkdtemp(
@@ -20,6 +22,14 @@ try {
     platform: "node",
     target: "node24",
     format: "esm",
+    banner: {
+      js: nodeEsmBanner,
+    },
+    plugins: [
+      await createDshPackageVersionPlugin(
+        new URL("../package.json", import.meta.url),
+      ),
+    ],
     logLevel: "warning",
     outfile: entry,
   });
