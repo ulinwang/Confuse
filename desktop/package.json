@@ -18,7 +18,8 @@
     "test": "vitest run --passWithNoTests",
     "package": "node scripts/build.mjs && electron-forge package",
     "make": "node scripts/build.mjs && electron-forge make",
-    "make:mac": "node scripts/build.mjs && node scripts/make-mac.mjs && node scripts/verify-dmgs.mjs"
+    "make:mac": "node scripts/build.mjs && node scripts/make-mac.mjs && node scripts/verify-dmgs.mjs",
+    "smoke:runtime": "node scripts/smoke-runtime.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "4.1.0",
