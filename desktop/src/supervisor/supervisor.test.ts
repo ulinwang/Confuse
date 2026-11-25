@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentRuntimeAdapter } from "./adapters";
 import { readSupervisorConfig } from "./config";
 import { MemorySecretStore } from "./keychain";
@@ -70,12 +70,18 @@ describe("supervisor IPC", () => {
   const clients: Client[] = [];
 
   afterEach(async () => {
+    vi.useRealTimers();
     for (const client of clients) client.close();
-    await Promise.all(supervisors.map((supervisor) => supervisor.stop(false)));
+    await Promise.all(
+      supervisors.map((supervisor) =>
+        supervisor.stop(false).catch(() => undefined),
+      ),
+    );
     for (const directory of directories.splice(0))
       rmSync(directory, { recursive: true, force: true });
     supervisors.length = 0;
     clients.length = 0;
+    vi.restoreAllMocks();
   });
 
   async function createSupervisor(onStopped?: () => void) {
@@ -103,6 +109,29 @@ describe("supervisor IPC", () => {
     clients.push(client);
     await client.connect(join(stateDir, "supervisor.sock"));
     return { supervisor, client, stateDir };
+  }
+
+  async function startRuntimeWithFailingDocker(fetchImpl: typeof fetch) {
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-runtime-retry-"));
+    directories.push(stateDir);
+    const failingRunner: ProcessRunner = {
+      async run(_command, args) {
+        if (args[0] === "version")
+          throw new Error("Docker Engine is unavailable");
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const supervisor = new Supervisor(
+      readSupervisorConfig({ CONFUSE_STATE_DIR: stateDir }),
+      {
+        runner: failingRunner,
+        secrets: new MemorySecretStore(),
+        fetch: fetchImpl,
+      },
+    );
+    supervisors.push(supervisor);
+    await supervisor.start();
+    return { supervisor, stateDir };
   }
 
   it("validates requests, emits job events, and persists onboarding state", async () => {
@@ -195,6 +224,159 @@ describe("supervisor IPC", () => {
     clients.push(client);
     await client.connect(join(stateDir, "supervisor.sock"));
     expect((await client.request("desktop.get-state")).ok).toBe(true);
+  });
+
+  it("retries a degraded runtime with one flight and no duplicate notifications", async () => {
+    vi.useFakeTimers();
+    let healthChecks = 0;
+    let healthy = false;
+    let resolveRetry!: (response: Response) => void;
+    const { supervisor } = await startRuntimeWithFailingDocker(async () => {
+      healthChecks++;
+      if (healthChecks === 2) {
+        return new Promise<Response>((resolve) => {
+          resolveRetry = resolve;
+        });
+      }
+      return healthy
+        ? Response.json({ status: "ok", service: "confuse" })
+        : new Response(null, { status: 503 });
+    });
+    const notificationCount = () =>
+      supervisor.store
+        .listNotifications()
+        .filter(
+          (notification) =>
+            notification.title === "Confuse runtime needs attention",
+        ).length;
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(supervisor.store.getDesktopState().runtime).toBe("degraded");
+    expect(notificationCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(healthChecks).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(healthChecks).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(healthChecks).toBe(2);
+    resolveRetry(new Response(null, { status: 503 }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(notificationCount()).toBe(1);
+
+    healthy = true;
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(healthChecks).toBe(3);
+    expect(supervisor.store.getDesktopState().runtime).toBe("ready");
+    expect(notificationCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(healthChecks).toBe(3);
+  });
+
+  it.each(["stop", "quit"] as const)(
+    "cancels a scheduled runtime retry on %s",
+    async (action) => {
+      vi.useFakeTimers();
+      let healthChecks = 0;
+      const { supervisor, stateDir } = await startRuntimeWithFailingDocker(
+        async () => {
+          healthChecks++;
+          return new Response(null, { status: 503 });
+        },
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      expect(supervisor.store.getDesktopState().runtime).toBe("degraded");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(healthChecks).toBe(2);
+
+      if (action === "stop") {
+        await supervisor.stop(false);
+      } else {
+        const client = new Client();
+        clients.push(client);
+        await client.connect(join(stateDir, "supervisor.sock"));
+        expect((await client.request("desktop.quit")).ok).toBe(true);
+        await vi.advanceTimersByTimeAsync(25);
+      }
+
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(healthChecks).toBe(2);
+    },
+  );
+
+  it("does not wait for an aborted runtime startup before stopping", async () => {
+    let markStartupStarted!: () => void;
+    const startupStarted = new Promise<void>((resolve) => {
+      markStartupStarted = resolve;
+    });
+    let rejectStartup!: (error: Error) => void;
+    const hangingRunner: ProcessRunner = {
+      async run(_command, args) {
+        if (args.includes("ps"))
+          return { stdout: "langfuse-web\n", stderr: "" };
+        if (args.includes("info"))
+          return {
+            stdout: JSON.stringify({ NCPU: 2, MemTotal: 4 * 1024 ** 3 }),
+            stderr: "",
+          };
+        if (args.includes("up")) {
+          markStartupStarted();
+          return new Promise((_, reject) => {
+            rejectStartup = reject;
+          });
+        }
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-startup-stop-"));
+    directories.push(stateDir);
+    const supervisor = new Supervisor(
+      readSupervisorConfig({ CONFUSE_STATE_DIR: stateDir }),
+      {
+        runner: hangingRunner,
+        secrets: new MemorySecretStore(),
+        fetch: async () => new Response(null, { status: 503 }),
+      },
+    );
+    supervisors.push(supervisor);
+    await supervisor.start();
+    await startupStarted;
+    const client = new Client();
+    clients.push(client);
+    await client.connect(join(stateDir, "supervisor.sock"));
+
+    const quitting = client.request("desktop.quit");
+    const response = await Promise.race([
+      quitting,
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve("pending"), 100),
+      ),
+    ]);
+    rejectStartup(new Error("Startup aborted"));
+    if (response === "pending") await quitting;
+    await supervisor.stop(false);
+
+    expect(response).not.toBe("pending");
+    expect(response.ok).toBe(true);
+  });
+
+  it("observes finalization failures after the quit response window", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const { supervisor, client } = await createSupervisor(() => {
+      throw new Error("Finalization failed");
+    });
+
+    const response = await client.request("desktop.quit");
+    expect(response.ok).toBe(true);
+    await waitFor(() =>
+      consoleError.mock.calls.some((call) =>
+        String(call[0]).includes("Confuse supervisor shutdown failed"),
+      ),
+    );
+    await expect(supervisor.stop(false)).rejects.toThrow("Finalization failed");
   });
 
   it("stops only the confuse Compose project before acknowledging full quit", async () => {

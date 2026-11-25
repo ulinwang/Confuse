@@ -26,6 +26,7 @@ vi.mock("@langfuse/shared/src/db", () => ({
   prisma: { user: { findUnique: mocks.findUser } },
 }));
 
+import healthHandler from "@/src/pages/api/desktop/health";
 import handler from "@/src/pages/api/desktop/session";
 
 function authOptions(secure = false): NextAuthOptions {
@@ -54,6 +55,7 @@ function request(
     method?: RequestMethod;
     remoteAddress?: string;
     authorization?: string;
+    host?: string;
   } = {},
 ) {
   const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
@@ -65,7 +67,11 @@ function request(
   });
   req.headers.authorization =
     options.authorization ?? `Bearer ${DESKTOP_AUTH_TOKEN}`;
+  const host = "host" in options ? options.host : "127.0.0.1:3000";
+  if (host) req.headers.host = host;
+  else delete req.headers.host;
   req.headers["x-forwarded-for"] = "127.0.0.1";
+  req.headers["x-forwarded-host"] = "127.0.0.1";
   return { req, res };
 }
 
@@ -156,6 +162,31 @@ describe("desktop session API", () => {
     expect(sessionCookie(res, true).attributes).toContain("Secure");
   });
 
+  it.each(["192.168.65.1", "::ffff:192.168.65.1"])(
+    "accepts the Docker Desktop NAT peer %s with a loopback Host",
+    async (remoteAddress) => {
+      const { req, res } = request({ remoteAddress, host: "localhost:3000" });
+
+      await handler(req, res);
+
+      expect(res.statusCode).toBe(204);
+      expect(res.getHeader("Set-Cookie")).toBeDefined();
+    },
+  );
+
+  it.each([undefined, "192.168.65.1:3000", "langfuse.example"])(
+    "rejects non-loopback Host %s despite a forwarded loopback Host",
+    async (host) => {
+      const { req, res } = request({ host });
+
+      await handler(req, res);
+
+      expect(res.statusCode).toBe(403);
+      expect(mocks.getAuthOptions).not.toHaveBeenCalled();
+      expect(res.getHeader("Set-Cookie")).toBeUndefined();
+    },
+  );
+
   it("is unavailable without the desktop auth token configuration", async () => {
     vi.stubEnv("CONFUSE_DESKTOP_AUTH_TOKEN", "");
     const { req, res } = request();
@@ -167,7 +198,7 @@ describe("desktop session API", () => {
     expect(res.getHeader("Set-Cookie")).toBeUndefined();
   });
 
-  it.each(["192.0.2.10", "::2", undefined])(
+  it.each(["192.0.2.10", "192.168.65.2", "::2", undefined])(
     "rejects non-loopback peer %s even with a forwarded loopback address",
     async (remoteAddress) => {
       const { req, res } = request({ remoteAddress });
@@ -206,5 +237,22 @@ describe("desktop session API", () => {
     expect(res.statusCode).toBe(404);
     expect(mocks.jwt).not.toHaveBeenCalled();
     expect(res.getHeader("Set-Cookie")).toBeUndefined();
+  });
+});
+
+describe("desktop health API", () => {
+  it("identifies the running application as Confuse", async () => {
+    const { req, res } = createMocks<NextApiRequest, NextApiResponse>({
+      method: "GET",
+    });
+
+    await healthHandler(req, res);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res._getData())).toEqual({
+      status: "ok",
+      service: "confuse",
+    });
+    expect(res.getHeader("Cache-Control")).toBe("no-store");
   });
 });

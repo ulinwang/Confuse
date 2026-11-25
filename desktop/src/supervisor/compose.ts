@@ -1,4 +1,4 @@
-import type { SupervisorConfig } from "./config";
+import { resolveDockerExecutable, type SupervisorConfig } from "./config";
 import { loadOrCreateSecrets } from "./keychain";
 import type { DesktopSecrets, SecretStore } from "./keychain";
 import type { ProcessRunner } from "./process";
@@ -23,7 +23,7 @@ export class ComposeManager {
   async start(signal?: AbortSignal): Promise<DesktopSecrets> {
     const secrets = await loadOrCreateSecrets(this.secrets);
     await this.runner.run(
-      "/usr/local/bin/docker",
+      resolveDockerExecutable(this.baseEnv),
       [
         "compose",
         "--project-name",
@@ -49,7 +49,7 @@ export class ComposeManager {
   async hasRunningServices(): Promise<boolean> {
     const secrets = await loadOrCreateSecrets(this.secrets);
     const result = await this.runner.run(
-      "/usr/local/bin/docker",
+      resolveDockerExecutable(this.baseEnv),
       [
         "compose",
         "--project-name",
@@ -70,7 +70,7 @@ export class ComposeManager {
   async stop(signal?: AbortSignal): Promise<void> {
     const secrets = await loadOrCreateSecrets(this.secrets);
     await this.runner.run(
-      "/usr/local/bin/docker",
+      resolveDockerExecutable(this.baseEnv),
       [
         "compose",
         "--project-name",

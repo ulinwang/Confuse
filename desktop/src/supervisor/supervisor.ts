@@ -17,6 +17,8 @@ import { SupervisorSocketServer } from "./socket-server";
 import { DesktopStore } from "./store";
 import { SdkOutboxDispatcher } from "./telemetry/sdk-dispatcher";
 
+const RUNTIME_RETRY_MS = 30_000;
+
 export interface SupervisorDependencies {
   runner?: ProcessRunner;
   secrets?: SecretStore;
@@ -39,6 +41,8 @@ export class Supervisor {
   private readonly startupAbort = new AbortController();
   private readonly onStopped?: (exitCode: number) => void;
   private runtimePromise?: Promise<void>;
+  private runtimeRetryTimer?: NodeJS.Timeout;
+  private runtimeFailureNotified = false;
   private stopPromise?: Promise<void>;
   private quitPromise?: Promise<void>;
   private agentAdapter?: DesktopAgentRuntimeAdapter;
@@ -141,7 +145,7 @@ export class Supervisor {
     this.jobs.start();
     this.outbox.start();
     this.startWaitingCodexJobResume();
-    if (options.runtime !== false) this.runtimePromise = this.startRuntime();
+    if (options.runtime !== false) void this.startRuntime();
   }
 
   private startWaitingCodexJobResume(): void {
@@ -159,7 +163,24 @@ export class Supervisor {
     this.waitingCodexJobTimer = undefined;
   }
 
-  private async startRuntime(): Promise<void> {
+  private startRuntime(): Promise<void> {
+    if (this.runtimePromise) return this.runtimePromise;
+    if (!this.started || this.stopping) return Promise.resolve();
+    this.clearRuntimeRetry();
+    const runtime = this.runRuntimeStartup();
+    this.runtimePromise = runtime;
+    void runtime.then(
+      () => this.clearRuntimePromise(runtime),
+      () => this.clearRuntimePromise(runtime),
+    );
+    return runtime;
+  }
+
+  private clearRuntimePromise(runtime: Promise<void>): void {
+    if (this.runtimePromise === runtime) this.runtimePromise = undefined;
+  }
+
+  private async runRuntimeStartup(): Promise<void> {
     this.changeRuntime("starting");
     try {
       if (!(await this.health.webIsReady())) {
@@ -169,21 +190,43 @@ export class Supervisor {
         await this.health.waitUntilReady(this.startupAbort.signal);
         await this.health.verifyIngestion(secrets);
       }
-      if (!this.stopping) this.changeRuntime("ready");
+      if (this.started && !this.stopping) {
+        this.clearRuntimeRetry();
+        this.runtimeFailureNotified = false;
+        this.changeRuntime("ready");
+      }
     } catch (error) {
-      if (this.stopping) return;
+      if (!this.started || this.stopping) return;
       this.changeRuntime("degraded");
-      const notification = this.store.createNotification({
-        severity: "error",
-        title: "Confuse runtime needs attention",
-        body:
-          error instanceof Error
-            ? error.message
-            : "The local runtime could not start",
-        actionRoute: "notifications",
-      });
-      this.events.emit("desktop.notification-created", notification);
+      if (!this.runtimeFailureNotified) {
+        const notification = this.store.createNotification({
+          severity: "error",
+          title: "Confuse runtime needs attention",
+          body:
+            error instanceof Error
+              ? error.message
+              : "The local runtime could not start",
+          actionRoute: "notifications",
+        });
+        this.events.emit("desktop.notification-created", notification);
+        this.runtimeFailureNotified = true;
+      }
+      this.scheduleRuntimeRetry();
     }
+  }
+
+  private scheduleRuntimeRetry(): void {
+    if (!this.started || this.stopping || this.runtimeRetryTimer) return;
+    this.runtimeRetryTimer = setTimeout(() => {
+      this.runtimeRetryTimer = undefined;
+      void this.startRuntime();
+    }, RUNTIME_RETRY_MS);
+    this.runtimeRetryTimer.unref();
+  }
+
+  private clearRuntimeRetry(): void {
+    if (this.runtimeRetryTimer) clearTimeout(this.runtimeRetryTimer);
+    this.runtimeRetryTimer = undefined;
   }
 
   private changeRuntime(
@@ -208,9 +251,9 @@ export class Supervisor {
     this.stopping = true;
     this.started = false;
     this.stopWaitingCodexJobResume();
+    this.clearRuntimeRetry();
     this.startupAbort.abort();
     this.changeRuntime("stopped");
-    await this.runtimePromise?.catch(() => undefined);
     try {
       await this.compose.stop();
     } catch (error) {
@@ -229,10 +272,27 @@ export class Supervisor {
     await this.jobs.stop();
     await this.outbox.stop();
     await this.sdkDispatcher.close();
-    const timer = setTimeout(() => {
-      this.stopPromise = this.finalizeStop();
-    }, 25);
-    timer.unref();
+    this.stopPromise = this.finalizeAfterQuit();
+    void this.observeFinalization(this.stopPromise);
+  }
+
+  private async finalizeAfterQuit(): Promise<void> {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 25);
+      timer.unref();
+    });
+    await this.finalizeStop();
+  }
+
+  private async observeFinalization(promise: Promise<void>): Promise<void> {
+    try {
+      await promise;
+    } catch (error) {
+      console.error(
+        "Confuse supervisor shutdown failed:",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
   }
 
   stop(stopCompose = false): Promise<void> {
@@ -245,9 +305,9 @@ export class Supervisor {
     this.stopping = true;
     this.started = false;
     this.stopWaitingCodexJobResume();
+    this.clearRuntimeRetry();
     this.startupAbort.abort();
     this.changeRuntime("stopped");
-    await this.runtimePromise?.catch(() => undefined);
     if (stopCompose) await this.compose.stop();
     await this.jobs.stop();
     await this.outbox.stop();

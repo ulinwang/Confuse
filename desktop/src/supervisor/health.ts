@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { statfs } from "node:fs/promises";
 import { createConnection } from "node:net";
-import type { SupervisorConfig } from "./config";
+import { resolveDockerExecutable, type SupervisorConfig } from "./config";
 import type { DesktopSecrets } from "./keychain";
 import type { ProcessRunner } from "./process";
 
@@ -54,12 +54,12 @@ export class HealthChecker {
   async preflight(
     options: { allowOccupiedPorts?: boolean } = {},
   ): Promise<void> {
-    await this.runner.run("/usr/local/bin/docker", [
+    await this.runner.run(resolveDockerExecutable(), [
       "version",
       "--format",
       "{{.Server.Version}}",
     ]);
-    const info = await this.runner.run("/usr/local/bin/docker", [
+    const info = await this.runner.run(resolveDockerExecutable(), [
       "info",
       "--format",
       "{{json .}}",
@@ -97,12 +97,20 @@ export class HealthChecker {
   async webIsReady(): Promise<boolean> {
     try {
       const response = await this.fetchImpl(
-        `${this.config.webUrl}/api/public/health`,
+        `${this.config.webUrl}/api/desktop/health`,
         {
           signal: AbortSignal.timeout(2_000),
         },
       );
-      return response.ok;
+      if (!response.ok) return false;
+      const body: unknown = await response.json();
+      if (typeof body !== "object" || body === null) return false;
+      return (
+        "status" in body &&
+        body.status === "ok" &&
+        "service" in body &&
+        body.service === "confuse"
+      );
     } catch {
       return false;
     }

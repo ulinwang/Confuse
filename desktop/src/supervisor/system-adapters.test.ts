@@ -1,9 +1,17 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { COMPOSE_SERVICES, ComposeManager } from "./compose";
 import { readSupervisorConfig } from "./config";
+import { HealthChecker } from "./health";
 import { MacOsKeychain, MemorySecretStore } from "./keychain";
 import { LaunchAgentManager } from "./launch-agent";
 import {
@@ -20,6 +28,7 @@ class MockRunner implements ProcessRunner {
   }[] = [];
   keychain?: string;
   launchAgentLoaded = false;
+  launchAgentError?: ProcessRunError;
 
   async run(
     command: string,
@@ -32,7 +41,10 @@ class MockRunner implements ProcessRunner {
       args[0] === "print" &&
       !this.launchAgentLoaded
     ) {
-      throw new ProcessRunError("Not loaded", 1, null);
+      throw (
+        this.launchAgentError ??
+        new ProcessRunError("Could not find service", 113, null)
+      );
     }
     if (command === "/bin/launchctl" && args[0] === "bootstrap")
       this.launchAgentLoaded = true;
@@ -102,6 +114,60 @@ describe("system adapters", () => {
     expect(stop.args).not.toContain("--volumes");
   });
 
+  it("prefers the Docker Desktop CLI and allows ten minutes for the initial image pull", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-docker-desktop-"));
+    directories.push(stateDir);
+    const home = join(stateDir, "home");
+    const dockerBin = join(home, ".docker", "bin");
+    mkdirSync(dockerBin, { recursive: true });
+    const dockerPath = join(dockerBin, "docker");
+    writeFileSync(dockerPath, "#!/bin/sh\n");
+    chmodSync(dockerPath, 0o755);
+    const runner = new MockRunner();
+    const manager = new ComposeManager(
+      readSupervisorConfig({
+        CONFUSE_STATE_DIR: stateDir,
+        CONFUSE_RESOURCE_DIR: resolve("resources"),
+        HOME: home,
+      }),
+      new MemorySecretStore(),
+      runner,
+      { HOME: home, PATH: "/usr/bin" },
+    );
+
+    await manager.start();
+
+    const start = runner.calls[0];
+    expect(start.command).toBe(dockerPath);
+    expect(start.args).toContain("600");
+    expect(start.options?.timeoutMs).toBe(630_000);
+  });
+
+  it("accepts only the Confuse health identity from the desktop health endpoint", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-health-"));
+    directories.push(stateDir);
+    const requests: string[] = [];
+    const responses = [
+      { status: "ok", service: "langfuse" },
+      { status: "ok", service: "confuse" },
+    ];
+    const checker = new HealthChecker(
+      config(stateDir),
+      new MockRunner(),
+      async (input) => {
+        requests.push(String(input));
+        return Response.json(responses.shift());
+      },
+    );
+
+    expect(await checker.webIsReady()).toBe(false);
+    expect(await checker.webIsReady()).toBe(true);
+    expect(requests).toEqual([
+      "http://127.0.0.1:3000/api/desktop/health",
+      "http://127.0.0.1:3000/api/desktop/health",
+    ]);
+  });
+
   it("keeps Keychain values out of process arguments", async () => {
     const runner = new MockRunner();
     const keychain = new MacOsKeychain(runner);
@@ -109,6 +175,25 @@ describe("system adapters", () => {
     expect(runner.calls[0].args).toEqual(["-i"]);
     expect(runner.calls[0].options?.input).not.toContain("synthetic-secret");
     expect(await keychain.get("SALT")).toBe("synthetic-secret");
+  });
+
+  it("does not treat launchctl failures as an unloaded LaunchAgent", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-launch-agent-error-"));
+    directories.push(stateDir);
+    const runner = new MockRunner();
+    runner.launchAgentError = new ProcessRunError(
+      "launchctl print failed: Input/output error",
+      5,
+      null,
+    );
+    const manager = new LaunchAgentManager(
+      config(stateDir),
+      runner,
+      process.getuid(),
+      join(stateDir, "com.confuse.supervisor.plist"),
+    );
+
+    await expect(manager.uninstall()).rejects.toThrow("Input/output error");
   });
 
   it("installs and uninstalls a LaunchAgent only in the requested temporary path", async () => {

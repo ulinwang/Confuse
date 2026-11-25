@@ -12,7 +12,7 @@ import { request } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Context } from "@deepseek-ai/cordis";
 import {
   SESSION_FORMAT_VERSION,
@@ -297,8 +297,9 @@ describe("supervisor Agent integration", () => {
   });
 
   it("uses only a validated new Codex hook as recovery evidence", async () => {
+    let trusted = false;
     const fixture = await createFixture({
-      isCodexHookTrusted: async () => false,
+      isCodexHookTrusted: async () => trusted,
       waitingCodexJobPollMs: 100000,
     });
     await installFakeCodex(fixture.applications);
@@ -338,6 +339,7 @@ describe("supervisor Agent integration", () => {
     await fixture.supervisor.jobs.drain();
     expect(fixture.supervisor.store.listJobs()).toHaveLength(1);
 
+    trusted = true;
     const envelope = {
       source: "confuse-agent-hook",
       agent: "chatgpt-codex",
@@ -383,6 +385,134 @@ describe("supervisor Agent integration", () => {
           (record.payload as TelemetryEvent).metadata?.historical === true,
       ),
     ).toHaveLength(1);
+  });
+
+  it("does not reuse Codex hook evidence recorded without a waiting job", async () => {
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => false,
+      waitingCodexJobPollMs: 100000,
+    });
+    await installFakeCodex(fixture.applications);
+    await fixture.supervisor.start({ runtime: false });
+
+    expect(
+      (await postHook(fixture.socketPath, codexHookEnvelope("stale-event")))
+        .body,
+    ).toEqual({ accepted: 1 });
+    await fixture.supervisor.jobs.drain();
+
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "chatgpt-codex", importHistory: false }],
+    });
+    await fixture.supervisor.jobs.drain();
+    const waitingId = connected.result.jobIds[0] as string;
+    const waiting = fixture.supervisor.store.getJob(waitingId).job;
+    expect(waiting.state, waiting.message).toBe("waiting-for-review");
+
+    await postHook(fixture.socketPath, codexHookEnvelope("stale-event"));
+    await postHook(fixture.socketPath, codexHookEnvelope("current-event"));
+    await fixture.supervisor.jobs.drain();
+    expect(
+      fixture.supervisor.store
+        .listJobs()
+        .filter((job) => job.kind === "connect"),
+    ).toHaveLength(1);
+  });
+
+  it("rechecks current Codex trust when execution evidence resumes a job", async () => {
+    let trusted = false;
+    let revokeOnNextCheck = false;
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => {
+        const current = trusted;
+        if (revokeOnNextCheck) {
+          trusted = false;
+          revokeOnNextCheck = false;
+        }
+        return current;
+      },
+      waitingCodexJobPollMs: 100000,
+    });
+    await installFakeCodex(fixture.applications);
+    await fixture.supervisor.start({ runtime: false });
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "chatgpt-codex", importHistory: false }],
+    });
+    await fixture.supervisor.jobs.drain();
+    const waitingId = connected.result.jobIds[0] as string;
+
+    trusted = true;
+    revokeOnNextCheck = true;
+    await postHook(fixture.socketPath, codexHookEnvelope("execution-event"));
+    await fixture.supervisor.jobs.drain();
+
+    expect(fixture.supervisor.store.getJob(waitingId).job.state).toBe(
+      "cancelled",
+    );
+    const connectJobs = fixture.supervisor.store
+      .listJobs()
+      .filter((job) => job.kind === "connect");
+    expect(connectJobs).toHaveLength(2);
+    const retried = connectJobs.find((job) => job.id !== waitingId);
+    expect(retried?.state, retried?.message).toBe("waiting-for-review");
+
+    await postHook(fixture.socketPath, codexHookEnvelope("untrusted-event"));
+    await fixture.supervisor.jobs.drain();
+    expect(
+      fixture.supervisor.store
+        .listJobs()
+        .filter((job) => job.kind === "connect"),
+    ).toHaveLength(2);
+  });
+
+  it("keeps Codex waiting after a watermark failure until review succeeds", async () => {
+    let trusted = false;
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => trusted,
+      waitingCodexJobPollMs: 10,
+    });
+    await installFakeCodex(fixture.applications);
+    await mkdir(join(fixture.home, ".codex"), { recursive: true });
+    await writeFile(
+      join(fixture.home, ".codex", "history.jsonl"),
+      `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          thread_id: "synthetic-watermark-thread",
+          turn_id: "turn-1",
+          item: { type: "function_call", id: "item-1", name: "synthetic_tool" },
+        },
+      })}\n`,
+    );
+    await fixture.supervisor.start({ runtime: false });
+    vi.spyOn(fixture.supervisor.store, "getCursor").mockRejectedValueOnce(
+      new Error("synthetic watermark failure"),
+    );
+
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "chatgpt-codex", importHistory: false }],
+    });
+    await fixture.supervisor.jobs.drain();
+    const waitingId = connected.result.jobIds[0] as string;
+    const waiting = fixture.supervisor.store.getJob(waitingId).job;
+    expect(waiting.state).toBe("waiting-for-review");
+    expect(waiting.message).toContain("synthetic watermark failure");
+    expect(waiting.message).not.toContain("Live capture is configured");
+
+    trusted = true;
+    await waitFor(() =>
+      fixture.supervisor.store
+        .listJobs()
+        .some((job) => job.id !== waitingId && job.state === "succeeded"),
+    );
+    await fixture.supervisor.jobs.drain();
+    expect(fixture.supervisor.store.getJob(waitingId).job.state).toBe(
+      "cancelled",
+    );
+    const recovered = fixture.supervisor.store
+      .listJobs()
+      .find((job) => job.id !== waitingId && job.kind === "connect");
+    expect(recovered?.message).toContain("History starts after");
   });
 
   it("rejects configuration writes outside the discovered Agent home", async () => {
@@ -583,6 +713,18 @@ async function invoke(
   });
   socket.write(`${JSON.stringify({ id, channel, payload })}\n`);
   return response;
+}
+
+function codexHookEnvelope(eventId: string) {
+  return {
+    source: "confuse-agent-hook",
+    agent: "chatgpt-codex",
+    payload: {
+      hook_event_name: "SessionStart",
+      session_id: "synthetic-live-thread",
+      event_id: eventId,
+    },
+  };
 }
 
 async function postHook(

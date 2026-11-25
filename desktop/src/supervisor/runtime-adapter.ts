@@ -72,7 +72,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly jobs: JobManager;
   private readonly onEnqueued?: () => void;
   private resumePromise?: Promise<void>;
-  private codexExecutionObserved = false;
+  private codexExecutionObservedJobId?: string;
 
   constructor(dependencies: AgentRuntimeAdapterDependencies) {
     this.context = dependencies.context;
@@ -144,25 +144,18 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
         ? "waiting-for-review"
         : "succeeded";
     if (result.state === "waiting-for-review") {
-      if (selection.kind === "chatgpt-codex" && this.codexExecutionObserved) {
-        connectionState = "connected";
-        state = "succeeded";
-        message = `${message} Hook execution verified.`;
-        this.codexExecutionObserved = false;
-      } else {
-        try {
-          const detected = await detectAgentConnectionState(
-            selection,
-            this.context,
-          );
-          if (detected === "connected") {
-            connectionState = "connected";
-            state = "succeeded";
-            message = `${message} Hook trust verified.`;
-          }
-        } catch {
-          connectionState = "waiting-for-review";
+      try {
+        const detected = await detectAgentConnectionState(
+          selection,
+          this.context,
+        );
+        if (detected === "connected") {
+          connectionState = "connected";
+          state = "succeeded";
+          message = `${message} Hook trust verified.`;
         }
+      } catch {
+        connectionState = "waiting-for-review";
       }
     }
     this.store.saveAgentConnection(selection, connectionState);
@@ -175,8 +168,12 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
         );
         message = `${message} History starts after the current position in ${count} discovered source(s).`;
       } catch (error) {
-        state = "partially-succeeded";
-        message = `${message} Live capture is configured, but the history watermark could not be recorded: ${errorMessage(error)}`;
+        if (state === "waiting-for-review") {
+          message = `${message} The history watermark could not be recorded: ${errorMessage(error)}`;
+        } else {
+          state = "partially-succeeded";
+          message = `${message} Live capture is configured, but the history watermark could not be recorded: ${errorMessage(error)}`;
+        }
       }
     }
     return { state, message };
@@ -225,8 +222,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     };
   }
 
-  async resumeWaitingCodexJobs(codexExecutionObserved = false): Promise<void> {
-    if (codexExecutionObserved) this.codexExecutionObserved = true;
+  async resumeWaitingCodexJobs(): Promise<void> {
     if (this.resumePromise) return this.resumePromise;
     const resume = this.performWaitingCodexJobResume();
     this.resumePromise = resume;
@@ -238,7 +234,37 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
   }
 
   private async performWaitingCodexJobResume(): Promise<void> {
-    const waiting = this.store
+    const waiting = this.waitingCodexJob();
+    if (!waiting) {
+      this.codexExecutionObservedJobId = undefined;
+      return;
+    }
+    if (this.codexExecutionObservedJobId !== waiting.id) {
+      this.codexExecutionObservedJobId = undefined;
+    }
+
+    try {
+      const record = this.store.getJob(waiting.id);
+      const parsed = codexConnectPayload.safeParse(record.payload);
+      if (!parsed.success) return;
+      const detected = await detectAgentConnectionState(
+        parsed.data.selections[0],
+        this.context,
+      );
+      if (detected !== "connected") return;
+      if (this.store.getJob(waiting.id).job.state === "waiting-for-review") {
+        if (this.codexExecutionObservedJobId === waiting.id) {
+          this.codexExecutionObservedJobId = undefined;
+        }
+        this.jobs.retry(waiting.id);
+      }
+    } catch {
+      return;
+    }
+  }
+
+  private waitingCodexJob() {
+    return this.store
       .listJobs()
       .filter(
         (job) =>
@@ -247,25 +273,6 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
           job.state === "waiting-for-review",
       )
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
-    if (!waiting) return;
-
-    try {
-      const record = this.store.getJob(waiting.id);
-      const parsed = codexConnectPayload.safeParse(record.payload);
-      if (!parsed.success) return;
-      if (!this.codexExecutionObserved) {
-        const detected = await detectAgentConnectionState(
-          parsed.data.selections[0],
-          this.context,
-        );
-        if (detected !== "connected" && !this.codexExecutionObserved) return;
-      }
-      if (this.store.getJob(waiting.id).job.state === "waiting-for-review") {
-        this.jobs.retry(waiting.id);
-      }
-    } catch {
-      return;
-    }
   }
 
   async ingestLiveEvent(input: unknown): Promise<number> {
@@ -295,7 +302,13 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     }
     this.onEnqueued?.();
     if (parsed.data.agent === "chatgpt-codex" && inserted) {
-      await this.resumeWaitingCodexJobs(true);
+      const waiting = this.waitingCodexJob();
+      if (!waiting) {
+        this.codexExecutionObservedJobId = undefined;
+      } else if (this.codexExecutionObservedJobId !== waiting.id) {
+        this.codexExecutionObservedJobId = waiting.id;
+        await this.resumeWaitingCodexJobs();
+      }
     }
     return events.length;
   }

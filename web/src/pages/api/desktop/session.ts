@@ -7,14 +7,35 @@ import { env } from "@/src/env.mjs";
 import { getAuthOptions } from "@/src/server/auth";
 import { prisma } from "@langfuse/shared/src/db";
 
-const isLoopbackPeer = (address: string | undefined): boolean => {
+const isDesktopPeer = (address: string | undefined): boolean => {
   if (address === "::1") return true;
   const ipv4Address = address?.startsWith("::ffff:")
     ? address.slice("::ffff:".length)
     : address;
   return Boolean(
-    ipv4Address && isIPv4(ipv4Address) && ipv4Address.startsWith("127."),
+    ipv4Address &&
+    isIPv4(ipv4Address) &&
+    (ipv4Address.startsWith("127.") || ipv4Address === "192.168.65.1"),
   );
+};
+
+const hasLoopbackHost = (host: string | undefined): boolean => {
+  if (!host) return false;
+  try {
+    const url = new URL(`http://${host}`);
+    return (
+      !url.username &&
+      !url.password &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      (url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
 };
 
 const hasValidBearerToken = (
@@ -65,7 +86,10 @@ export default async function desktopSession(
     res.status(405).json({ message: "Method not allowed" });
     return;
   }
-  if (!isLoopbackPeer(req.socket.remoteAddress)) {
+  if (
+    !hasLoopbackHost(req.headers.host) ||
+    !isDesktopPeer(req.socket.remoteAddress)
+  ) {
     res.status(403).json({ message: "Forbidden" });
     return;
   }

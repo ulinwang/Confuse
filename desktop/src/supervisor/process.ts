@@ -35,6 +35,8 @@ function truncated(value: string, maximum = 8_192): string {
   return value.length > maximum ? `${value.slice(0, maximum)}…` : value;
 }
 
+const TERMINATION_GRACE_MS = 1_000;
+
 export class NodeProcessRunner implements ProcessRunner {
   run(
     command: string,
@@ -50,22 +52,40 @@ export class NodeProcessRunner implements ProcessRunner {
       let stdout = "";
       let stderr = "";
       let settled = false;
-      let timedOut = false;
+      let terminationReason: "timeout" | "abort" | undefined;
+      let killTimer: NodeJS.Timeout | undefined;
 
       const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
         options.signal?.removeEventListener("abort", abort);
         callback();
       };
-      const abort = () => {
+      const terminate = (reason: "timeout" | "abort") => {
+        if (settled || terminationReason) return;
+        terminationReason = reason;
         child.kill("SIGTERM");
+        killTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+          finish(() =>
+            reject(
+              new ProcessRunError(
+                `${command} ${reason === "timeout" ? "timed out" : "was cancelled"}`,
+                null,
+                "SIGKILL",
+              ),
+            ),
+          );
+        }, TERMINATION_GRACE_MS);
+        killTimer.unref();
       };
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        child.kill("SIGTERM");
-      }, options.timeoutMs ?? 60_000);
+      const abort = () => terminate("abort");
+      const timeout = setTimeout(
+        () => terminate("timeout"),
+        options.timeoutMs ?? 60_000,
+      );
       timeout.unref();
 
       child.stdout.setEncoding("utf8");
@@ -81,9 +101,9 @@ export class NodeProcessRunner implements ProcessRunner {
       });
       child.on("close", (code, signal) => {
         finish(() => {
-          if (timedOut) {
+          if (terminationReason === "timeout") {
             reject(new ProcessRunError(`${command} timed out`, code, signal));
-          } else if (options.signal?.aborted) {
+          } else if (terminationReason === "abort") {
             reject(
               new ProcessRunError(`${command} was cancelled`, code, signal),
             );

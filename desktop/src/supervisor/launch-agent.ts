@@ -11,7 +11,7 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { escape } from "he";
 import { ensurePrivateDirectory, type SupervisorConfig } from "./config";
-import type { ProcessRunner } from "./process";
+import { ProcessRunError, type ProcessRunner } from "./process";
 
 export const LAUNCH_AGENT_LABEL = "com.confuse.supervisor";
 
@@ -131,8 +131,10 @@ export class LaunchAgentManager {
     try {
       await this.runner.run("/bin/launchctl", ["print", this.serviceDomain()]);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (error instanceof ProcessRunError && error.exitCode === 113)
+        return false;
+      throw error;
     }
   }
 }

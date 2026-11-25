@@ -1,4 +1,10 @@
-import { chmodSync, lstatSync, mkdirSync } from "node:fs";
+import {
+  accessSync,
+  chmodSync,
+  constants,
+  lstatSync,
+  mkdirSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -93,7 +99,7 @@ export function readSupervisorConfig(
     webUrl: `http://127.0.0.1:${webPort}`,
     startupTimeoutMs: positiveInteger(
       env.CONFUSE_STARTUP_TIMEOUT_MS,
-      180_000,
+      600_000,
       "CONFUSE_STARTUP_TIMEOUT_MS",
     ),
     outboxPollMs: positiveInteger(
@@ -102,6 +108,27 @@ export function readSupervisorConfig(
       "CONFUSE_OUTBOX_POLL_MS",
     ),
   };
+}
+
+export function resolveDockerExecutable(
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const candidates = [
+    join(env.HOME ?? homedir(), ".docker", "bin", "docker"),
+    "/usr/local/bin/docker",
+    "/opt/homebrew/bin/docker",
+    "/usr/bin/docker",
+  ];
+  return (
+    candidates.find((candidate) => {
+      try {
+        accessSync(candidate, constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }) ?? candidates[0]
+  );
 }
 
 export function ensurePrivateDirectory(path: string): void {
