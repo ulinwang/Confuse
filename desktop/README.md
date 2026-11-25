@@ -51,13 +51,18 @@ To rebuild local development images without starting Electron:
 pnpm --filter @confuse/desktop run build:images
 ```
 
-To publish both images for Linux AMD64 and ARM64, authenticate to GHCR with a token that can write packages, then explicitly select push mode. The tag defaults to `desktop/package.json`'s version and can be set explicitly:
+To publish both images, authenticate to GHCR with a token that can write packages, then build each architecture on a native runner with an explicit platform and architecture tag:
 
 ```sh
-pnpm --filter @confuse/desktop run build:images -- --push --tag 0.1.0
+# Native AMD64 runner
+pnpm --filter @confuse/desktop run build:images -- --push --platform linux/amd64 --tag 0.1.0-amd64
+# Native ARM64 runner
+pnpm --filter @confuse/desktop run build:images -- --push --platform linux/arm64 --tag 0.1.0-arm64
+# After both architecture tags exist
+CONFUSE_RELEASE_VERSION=0.1.0 node desktop/scripts/manifest-images.mjs
 ```
 
-The release workflow verifies that both `confuse-web` and `confuse-worker` are public and that anonymous manifests expose both Linux architectures. If a first-published package is private, open its GitHub package Settings, choose Change visibility → Public, and rerun the workflow. DMG CI artifacts can still be built while a package is private, but no formal GitHub release is created until anonymous pulls pass.
+The release workflow runs these native builds in parallel and publishes the versioned manifest only after both succeed. It then verifies that both `confuse-web` and `confuse-worker` are public and that anonymous manifests expose both Linux architectures. If a first-published package is private, open its GitHub package Settings, choose Change visibility → Public, and rerun the workflow. DMG CI artifacts can still be built while a package is private, but no formal GitHub release is created until anonymous pulls pass.
 
 `make` builds a DMG for the host architecture. To request both macOS architectures:
 

@@ -1,15 +1,12 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("../../", import.meta.url));
-const packageJson = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-);
 
-function options(argv) {
+function parseOptions(argv) {
   let push = false;
   let tag;
+  let platform;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--push") {
@@ -18,19 +15,27 @@ function options(argv) {
       tag = argv[index + 1];
       if (!tag) throw new Error("--tag requires a value");
       index += 1;
+    } else if (argument === "--platform") {
+      platform = argv[index + 1];
+      if (!platform) throw new Error("--platform requires a value");
+      index += 1;
     } else {
       throw new Error(`Unknown argument: ${argument}`);
     }
   }
   if (tag && !push) throw new Error("--tag requires --push");
-  tag ??= packageJson.version;
-  if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) {
+  if (push && !tag) throw new Error("--push requires --tag");
+  if (push && !platform) throw new Error("--push requires --platform");
+  if (platform && !["linux/amd64", "linux/arm64"].includes(platform)) {
+    throw new Error(`Unsupported image platform: ${platform}`);
+  }
+  if (tag && !/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(tag)) {
     throw new Error(`Invalid image tag: ${tag}`);
   }
-  return { push, tag };
+  return { push, tag, platform };
 }
 
-function buildImage(dockerfile, image, push) {
+function buildImage(dockerfile, image, { push, platform }) {
   return new Promise((resolve, reject) => {
     const memoryArgs =
       dockerfile === "web/Dockerfile"
@@ -41,12 +46,12 @@ function buildImage(dockerfile, image, push) {
             "CONFUSE_BUILD_WORKERS=1",
           ]
         : [];
+    const platformArgs = platform ? ["--platform", platform] : [];
     const args = push
       ? [
           "buildx",
           "build",
-          "--platform",
-          "linux/amd64,linux/arm64",
+          ...platformArgs,
           "--file",
           dockerfile,
           "--tag",
@@ -55,7 +60,16 @@ function buildImage(dockerfile, image, push) {
           ...memoryArgs,
           ".",
         ]
-      : ["build", "--file", dockerfile, "--tag", image, ...memoryArgs, "."];
+      : [
+          "build",
+          ...platformArgs,
+          "--file",
+          dockerfile,
+          "--tag",
+          image,
+          ...memoryArgs,
+          ".",
+        ];
     const child = spawn("docker", args, {
       cwd: repositoryRoot,
       env: process.env,
@@ -76,7 +90,7 @@ function buildImage(dockerfile, image, push) {
   });
 }
 
-const { push, tag } = options(process.argv.slice(2));
+const { push, tag, platform } = parseOptions(process.argv.slice(2));
 for (const [dockerfile, name] of [
   ["web/Dockerfile", "web"],
   ["worker/Dockerfile", "worker"],
@@ -84,5 +98,5 @@ for (const [dockerfile, name] of [
   const image = push
     ? `ghcr.io/ulinwang/confuse-${name}:${tag}`
     : `confuse-${name}:local`;
-  await buildImage(dockerfile, image, push);
+  await buildImage(dockerfile, image, { push, platform });
 }
