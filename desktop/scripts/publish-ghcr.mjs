@@ -1,3 +1,5 @@
+import { appendFileSync } from "node:fs";
+
 const visibilityToken =
   process.env.GHCR_VISIBILITY_TOKEN ?? process.env.GITHUB_TOKEN;
 const version = process.env.CONFUSE_RELEASE_VERSION;
@@ -5,7 +7,7 @@ const namespace = "ulinwang";
 const packageNames = ["confuse-web", "confuse-worker"];
 
 if (!visibilityToken) {
-  throw new Error("GITHUB_TOKEN is required to make release packages public");
+  throw new Error("GITHUB_TOKEN is required to inspect package visibility");
 }
 if (
   !version ||
@@ -14,26 +16,24 @@ if (
   throw new Error(`Invalid release version: ${version ?? "unset"}`);
 }
 
-async function makePublic(packageName) {
+async function readVisibility(packageName) {
   const response = await fetch(
     `https://api.github.com/user/packages/container/${packageName}`,
     {
-      method: "PATCH",
       headers: {
         Accept: "application/vnd.github+json",
         Authorization: `Bearer ${visibilityToken}`,
-        "Content-Type": "application/json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
-      body: JSON.stringify({ visibility: "public" }),
     },
   );
   if (!response.ok) {
     throw new Error(
-      `Failed to make ghcr.io/${namespace}/${packageName} public (HTTP ${response.status})`,
+      `Failed to inspect ghcr.io/${namespace}/${packageName} visibility (HTTP ${response.status})`,
     );
   }
-  console.log(`Made ghcr.io/${namespace}/${packageName} public`);
+  const metadata = await response.json();
+  return metadata.visibility;
 }
 
 async function anonymousManifest(packageName) {
@@ -88,10 +88,26 @@ async function anonymousManifest(packageName) {
   );
 }
 
+const privatePackages = [];
 for (const packageName of packageNames) {
-  await makePublic(packageName);
+  if ((await readVisibility(packageName)) !== "public") {
+    privatePackages.push(packageName);
+  }
 }
 
+if (privatePackages.length > 0) {
+  console.warn(
+    `Packages are not public: ${privatePackages.join(", ")}. Open each package's Settings and select Change visibility → Public, then rerun this workflow. No formal GitHub release will be created until anonymous pulls pass.`,
+  );
+  if (process.env.GITHUB_OUTPUT) {
+    appendFileSync(process.env.GITHUB_OUTPUT, "public=false\n");
+  }
+  process.exit(0);
+}
+
+if (process.env.GITHUB_OUTPUT) {
+  appendFileSync(process.env.GITHUB_OUTPUT, "public=true\n");
+}
 for (const packageName of packageNames) {
   let lastError;
   for (let attempt = 1; attempt <= 6; attempt += 1) {

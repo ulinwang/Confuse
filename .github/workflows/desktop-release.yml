@@ -60,6 +60,8 @@ jobs:
       packages: write
     env:
       CONFUSE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      public: ${{ steps.visibility.outputs.public }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,7 +78,8 @@ jobs:
           password: ${{ github.token }}
       - name: Build and publish multi-architecture images
         run: node desktop/scripts/build-images.mjs --push --tag "$CONFUSE_RELEASE_VERSION"
-      - name: Make packages public and verify anonymous pulls
+      - id: visibility
+        name: Verify public package access and anonymous pulls
         env:
           GHCR_VISIBILITY_TOKEN: ${{ github.token }}
         run: node desktop/scripts/publish-ghcr.mjs
@@ -158,8 +161,8 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [prepare, dmg]
-    if: needs.dmg.outputs.signed == 'true'
+    needs: [prepare, images, dmg]
+    if: needs.dmg.outputs.signed == 'true' && needs.images.outputs.public == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

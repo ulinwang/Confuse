@@ -57,7 +57,7 @@ To publish both images for Linux AMD64 and ARM64, authenticate to GHCR with a to
 pnpm --filter @confuse/desktop run build:images -- --push --tag 0.1.0
 ```
 
-The release workflow uses the repository's `packages: write` permission to PATCH both `confuse-web` and `confuse-worker` to `public` after the first push, then verifies anonymous manifest access and both Linux architectures. A failed PATCH or anonymous check stops the workflow before DMG creation and before any GitHub release.
+The release workflow verifies that both `confuse-web` and `confuse-worker` are public and that anonymous manifests expose both Linux architectures. If a first-published package is private, open its GitHub package Settings, choose Change visibility → Public, and rerun the workflow. DMG CI artifacts can still be built while a package is private, but no formal GitHub release is created until anonymous pulls pass.
 
 `make` builds a DMG for the host architecture. To request both macOS architectures:
 
@@ -86,4 +86,4 @@ The LaunchAgent receives only the resolved Web/worker image names, Web/MinIO por
 
 `.github/workflows/desktop-release.yml` runs for `desktop-v*` tags and manual dispatches. The version must match both `desktop/package.json` and the Compose defaults. It pushes and publicly verifies the Web and worker images, runs desktop tests, builds and validates exactly one ARM64 and one x64 macOS DMG, and uploads workflow artifacts. Only a complete Apple signing and notarization credential set enables the separate GitHub release job. Manual dispatches create the release tag at the dispatched commit when necessary.
 
-The workflow uses the repository's scoped `github.token` for image pushes, package visibility updates, and signed releases. It does not use Langfuse deployment or other upstream service secrets. When any `APPLE_*` secret described above is absent, it uploads `desktop-dmg-unsigned-<version>` with an explicit `UNSIGNED CI ARTIFACT` marker and does not create or update a GitHub release.
+The workflow uses the repository's scoped `github.token` for image pushes, package visibility inspection, and signed releases. It does not use Langfuse deployment or other upstream service secrets. When any `APPLE_*` secret described above is absent, it uploads `desktop-dmg-unsigned-<version>` with an explicit `UNSIGNED CI ARTIFACT` marker and does not create or update a GitHub release.
