@@ -139,9 +139,13 @@ ENV GOFIPS140=v1.0.0
 # compile this ourselves instead of downloading the upstream release
 # because prebuilt bins bundle many unused drivers and thus inherit CVEs
 # eg.: https://github.com/golang-migrate/migrate/issues/1357
-RUN mkdir -p /out && /usr/local/go/bin/go build -trimpath -tags 'clickhouse' -ldflags='-s -w' \
+WORKDIR /tmp/migrate
+RUN mkdir -p /out && \
+    /usr/local/go/bin/go mod init example.com/migrate-builder && \
+    /usr/local/go/bin/go get github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1 && \
+    /usr/local/go/bin/go build -trimpath -tags 'clickhouse' -ldflags='-s -w' \
     -o /out/migrate \
-    github.com/golang-migrate/migrate/v4/cmd/migrate@v4.19.1
+    github.com/golang-migrate/migrate/v4/cmd/migrate
 
 FROM --platform=${TARGETPLATFORM:-linux/amd64} build-base AS pruner
 
