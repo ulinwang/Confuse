@@ -154,16 +154,54 @@ async function redact(text) {
   );
 }
 
+const desktopSessionWebUrl = "http://127.0.0.1:39001";
+
+async function startDesktopSessionProxy() {
+  const [webContainer] = await dockerLines([
+    "ps",
+    "--filter",
+    "label=com.docker.compose.service=langfuse-web",
+    "--format",
+    "{{.Names}}",
+  ]);
+  assert.ok(webContainer);
+  await execFileAsync("/usr/bin/docker", [
+    "run",
+    "--detach",
+    "--rm",
+    "--name",
+    "confuse-smoke-session-proxy",
+    "--network",
+    `container:${webContainer}`,
+    "--publish",
+    "127.0.0.1:39001:39001",
+    config.webImage,
+    "node",
+    "-e",
+    'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "127.0.0.1");',
+  ]);
+}
+
+async function stopDesktopSessionProxy() {
+  await execFileAsync("/usr/bin/docker", [
+    "rm",
+    "-f",
+    "confuse-smoke-session-proxy",
+  ]).catch((error) => {
+    if (!String(error).includes("No such container")) throw error;
+  });
+}
+
 let sessionCookie;
 async function desktopSessionCookie() {
   if (sessionCookie) return sessionCookie;
   const token = await secrets.get("CONFUSE_DESKTOP_AUTH_TOKEN");
   assert.ok(token);
-  const response = await fetch(`${config.webUrl}/api/desktop/session`, {
+  const response = await fetch(`${desktopSessionWebUrl}/api/desktop/session`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
-      host: new URL(config.webUrl).host,
+      host: new URL(desktopSessionWebUrl).host,
     },
     signal: AbortSignal.timeout(15000),
   });
@@ -185,7 +223,7 @@ async function desktopTrace(traceId) {
     JSON.stringify({ traceId, projectId: "confuse-local" }),
   );
   const response = await fetch(
-    `${config.webUrl}/api/trpc/traces.byId?input=${input}`,
+    `${desktopSessionWebUrl}/api/trpc/traces.byId?input=${input}`,
     {
       headers: { cookie: await desktopSessionCookie() },
       signal: AbortSignal.timeout(15000),
@@ -304,6 +342,7 @@ try {
         notification.body.includes("Scanned 1 record(s); queued 1"),
     ),
   );
+  await startDesktopSessionProxy();
   await waitFor(
     async () => {
       const traceId = createHash("sha256")
@@ -387,5 +426,6 @@ try {
   throw error;
 } finally {
   await supervisor.stop(true);
+  await stopDesktopSessionProxy();
   await rm(root, { recursive: true, force: true });
 }
