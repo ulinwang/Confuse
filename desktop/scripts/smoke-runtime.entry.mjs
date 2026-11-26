@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { request } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -43,7 +50,7 @@ const fakeKimi = join(bin, "kimi");
 await writeFile(fakeKimi, "#!/bin/sh\necho 'kimi 1.2.3'\n");
 await chmod(fakeKimi, 0o755);
 
-const config = readSupervisorConfig({
+const baseConfig = readSupervisorConfig({
   ...process.env,
   CONFUSE_STATE_DIR: stateDir,
   CONFUSE_WEB_PORT: "39000",
@@ -52,6 +59,20 @@ const config = readSupervisorConfig({
   CONFUSE_STARTUP_TIMEOUT_MS: "600000",
   CONFUSE_OUTBOX_POLL_MS: "250",
 });
+const baseCompose = await readFile(baseConfig.composeFile, "utf8");
+const publishedWebPort = " - 127.0.0.1:${CONFUSE_WEB_PORT:-3000}:3000";
+assert.ok(baseCompose.includes(publishedWebPort));
+const config = {
+  ...baseConfig,
+  composeFile: join(root, "compose-session.yml"),
+};
+await writeFile(
+  config.composeFile,
+  baseCompose.replace(
+    publishedWebPort,
+    `${publishedWebPort}\n      - "127.0.0.1:39001:39001"`,
+  ),
+);
 const secrets = new MemorySecretStore();
 const supervisor = new Supervisor(config, {
   secrets,
@@ -173,8 +194,6 @@ async function startDesktopSessionProxy() {
     "confuse-smoke-session-proxy",
     "--network",
     `container:${webContainer}`,
-    "--publish",
-    "127.0.0.1:39001:39001",
     config.webImage,
     "node",
     "-e",
