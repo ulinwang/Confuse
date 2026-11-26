@@ -92,6 +92,18 @@ await writeFile(
 const secrets = new MemorySecretStore();
 const supervisor = new Supervisor(config, {
   secrets,
+  fetch: async (input, init) => {
+    const response = await fetch(input, init);
+    if (!response.ok && String(input).includes("/api/desktop/")) {
+      const body = await response.clone().text();
+      console.error(
+        await redact(
+          `Desktop API returned HTTP ${response.status}: ${body.slice(0, 1000)}`,
+        ),
+      );
+    }
+    return response;
+  },
   agentContext: {
     homeDir: home,
     env: { HOME: home, PATH: bin },
@@ -138,7 +150,7 @@ async function invoke(channel, payload, timeoutMs = 15000) {
   });
   socket.write(`${JSON.stringify({ id, channel, payload })}\n`);
   const result = await response;
-  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(result.ok, true, JSON.stringify(result.error));
   return result.result;
 }
 
