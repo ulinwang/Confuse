@@ -7,6 +7,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { request } from "node:http";
@@ -50,6 +51,9 @@ await writeFile(
 const fakeKimi = join(bin, "kimi");
 await writeFile(fakeKimi, "#!/bin/sh\necho 'kimi 1.2.3'\n");
 await chmod(fakeKimi, 0o755);
+const fakeClaude = join(bin, "claude");
+await writeFile(fakeClaude, "#!/bin/sh\necho 'claude 1.2.3'\n");
+await chmod(fakeClaude, 0o755);
 
 const baseConfig = readSupervisorConfig({
   ...process.env,
@@ -304,9 +308,9 @@ async function desktopSessionCookie() {
   return sessionCookie;
 }
 
-async function desktopTrace(traceId) {
+async function desktopTrace(traceId, projectId = "confuse-local") {
   const input = encodeURIComponent(
-    JSON.stringify({ json: { traceId, projectId: "confuse-local" } }),
+    JSON.stringify({ json: { traceId, projectId } }),
   );
   const response = await fetch(
     desktopSessionUrl(`/api/trpc/traces.byId?input=${input}`),
@@ -445,6 +449,15 @@ try {
     agents.find((agent) => agent.kind === "kimi-code")?.installed,
     true,
   );
+  assert.equal(
+    agents.find((agent) => agent.kind === "claude-code")?.installed,
+    true,
+  );
+  const organization = await invoke("desktop.create-organization", {
+    name: "Confuse Smoke",
+  });
+  assert.equal(organization.id, "confuse-desktop");
+  assert.equal(organization.name, "Confuse Smoke");
   const previews = await invoke("history.preview", { kinds: ["kimi-code"] });
   assert.equal(previews[0]?.sessionCount, 1);
   assert.equal(
@@ -453,12 +466,23 @@ try {
   );
 
   const connected = await invoke("desktop.complete-onboarding", {
-    selections: [{ kind: "kimi-code", importHistory: true }],
+    selections: [
+      { kind: "kimi-code", importHistory: true },
+      { kind: "claude-code", importHistory: false },
+    ],
   });
   await supervisor.jobs.drain();
+  for (const jobId of connected.jobIds) {
+    assert.equal(supervisor.store.getJob(jobId).job.state, "succeeded");
+  }
+  const connectedAgents = await invoke("agents.scan");
   assert.equal(
-    supervisor.store.getJob(connected.jobIds[0]).job.state,
-    "succeeded",
+    connectedAgents.find((agent) => agent.kind === "kimi-code")?.project?.id,
+    "confuse-kimi-code",
+  );
+  assert.equal(
+    connectedAgents.find((agent) => agent.kind === "claude-code")?.project?.id,
+    "confuse-claude-code",
   );
   const notifications = await invoke("notifications.list");
   assert.ok(
@@ -469,16 +493,28 @@ try {
         notification.body.includes("Scanned 1 record(s); queued 1"),
     ),
   );
+  assert.ok(
+    notifications.some(
+      (notification) =>
+        notification.actionRoute === "/project/confuse-kimi-code/sessions",
+    ),
+  );
+  assert.ok(
+    notifications.some(
+      (notification) =>
+        notification.actionRoute === "/project/confuse-claude-code/sessions",
+    ),
+  );
   await startDesktopSessionProxy();
+  const historyTraceId = createHash("sha256")
+    .update(`kimi-code:${historySession}`)
+    .digest("hex")
+    .slice(0, 32);
   await waitFor(
     async () => {
-      const traceId = createHash("sha256")
-        .update(`kimi-code:${historySession}`)
-        .digest("hex")
-        .slice(0, 32);
-      const trace = await desktopTrace(traceId);
+      const trace = await desktopTrace(historyTraceId, "confuse-kimi-code");
       if (
-        trace.id === traceId &&
+        trace.id === historyTraceId &&
         trace.name === "kimi-code session" &&
         trace.sessionId === historySession
       ) {
@@ -521,7 +557,7 @@ try {
     .slice(0, 32);
   await waitFor(
     async () => {
-      const trace = await desktopTrace(liveTraceId);
+      const trace = await desktopTrace(liveTraceId, "confuse-kimi-code");
       if (trace.id === liveTraceId && trace.sessionId === liveSession) {
         return true;
       }
@@ -543,6 +579,32 @@ try {
     "the telemetry outbox to drain",
   );
 
+  const removed = await invoke("desktop.remove-integrations", undefined);
+  assert.equal(removed.state, "succeeded");
+  const cleanedAgents = await invoke("agents.scan");
+  for (const kind of ["kimi-code", "claude-code"]) {
+    const agent = cleanedAgents.find((candidate) => candidate.kind === kind);
+    assert.equal(agent?.connectionState, "not-connected");
+    assert.equal(agent?.project, undefined);
+  }
+  assert.equal(supervisor.store.getOrganization(), undefined);
+  assert.equal(supervisor.store.getAgentProject("kimi-code"), undefined);
+  const scriptErrors = await Promise.all(
+    [
+      join(home, ".kimi-code", "hooks", "confuse-forward.mjs"),
+      join(home, ".claude", "hooks", "confuse-forward.mjs"),
+    ].map((path) => stat(path).catch((error) => error)),
+  );
+  assert.ok(scriptErrors.every((error) => error.code === "ENOENT"));
+  const retainedTrace = await desktopTrace(historyTraceId, "confuse-kimi-code");
+  assert.equal(retainedTrace.id, historyTraceId);
+  assert.equal(retainedTrace.sessionId, historySession);
+  assert.ok(
+    (await invoke("notifications.list")).some(
+      (notification) => notification.title === "Confuse integrations removed",
+    ),
+  );
+
   await stopDesktopSessionProxy();
   await invoke("desktop.quit", undefined, 90000);
   assert.deepEqual(
@@ -557,7 +619,7 @@ try {
   );
   assert.equal((await smokeVolumes()).length, 5);
   console.log(
-    "Confuse runtime smoke passed: six services, opt-in history, live SDK ingestion, notification, clean quit, and preserved volumes.",
+    "Confuse runtime smoke passed: six services, organization and per-Agent projects, opt-in history, live SDK ingestion, notification, safe cleanup, clean quit, and preserved volumes.",
   );
 } catch (error) {
   failure = error;
