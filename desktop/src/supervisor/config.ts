@@ -16,7 +16,7 @@ export interface SupervisorConfig {
   composeFile: string;
   launchAgentTemplatePath: string;
   supervisorEntryPath: string;
-  composeProject: "confuse";
+  composeProject: string;
   webImage: string;
   workerImage: string;
   webPort: number;

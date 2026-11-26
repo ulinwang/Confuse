@@ -31,6 +31,7 @@ const home = join(root, "home");
 const bin = join(root, "bin");
 const historySession = `synthetic-history-${randomUUID()}`;
 const liveSession = `synthetic-live-${randomUUID()}`;
+const composeProject = `confuse-smoke-${randomUUID().replaceAll("-", "")}`;
 const historyDirectory = join(home, ".kimi-code", "sessions", historySession);
 await Promise.all([
   mkdir(bin, { recursive: true }),
@@ -59,12 +60,23 @@ const baseConfig = readSupervisorConfig({
   CONFUSE_STARTUP_TIMEOUT_MS: "600000",
   CONFUSE_OUTBOX_POLL_MS: "250",
 });
+const releaseVersion = process.env.CONFUSE_RELEASE_VERSION;
+assert.ok(releaseVersion, "CONFUSE_RELEASE_VERSION is required");
+assert.equal(
+  baseConfig.webImage,
+  `ghcr.io/ulinwang/confuse-web:${releaseVersion}`,
+);
+assert.equal(
+  baseConfig.workerImage,
+  `ghcr.io/ulinwang/confuse-worker:${releaseVersion}`,
+);
 const baseCompose = await readFile(baseConfig.composeFile, "utf8");
 const publishedWebPort = " - 127.0.0.1:${CONFUSE_WEB_PORT:-3000}:3000";
 assert.ok(baseCompose.includes(publishedWebPort));
 const config = {
   ...baseConfig,
   composeFile: join(root, "compose-session.yml"),
+  composeProject,
 };
 await writeFile(
   config.composeFile,
@@ -82,15 +94,23 @@ const supervisor = new Supervisor(config, {
     applicationDirs: [join(home, "Applications")],
   },
 });
+const verifyIngestion = supervisor.health.verifyIngestion.bind(
+  supervisor.health,
+);
+let startupProbeSucceeded = false;
+supervisor.health.verifyIngestion = async (secrets) => {
+  await verifyIngestion(secrets);
+  startupProbeSucceeded = true;
+};
 
-async function invoke(channel, payload) {
+async function invoke(channel, payload, timeoutMs = 15000) {
   const socket = createConnection(config.socketPath);
   await new Promise((resolve, reject) => {
     socket.once("connect", resolve);
     socket.once("error", reject);
   });
   socket.setEncoding("utf8");
-  socket.setTimeout(15000, () => {
+  socket.setTimeout(timeoutMs, () => {
     socket.destroy(new Error(`Socket request timed out: ${channel}`));
   });
   const id = randomUUID();
@@ -167,6 +187,26 @@ async function dockerLines(args) {
   return stdout.split("\n").filter(Boolean);
 }
 
+async function smokeVolumes() {
+  return dockerLines([
+    "volume",
+    "ls",
+    "--filter",
+    `label=com.docker.compose.project=${composeProject}`,
+    "--format",
+    "{{.Name}}",
+  ]);
+}
+
+async function removeSmokeVolumes() {
+  const volumes = await smokeVolumes();
+  if (volumes.length > 0) {
+    await execFileAsync("/usr/bin/docker", ["volume", "rm", ...volumes], {
+      timeout: 15000,
+    });
+  }
+}
+
 async function redact(text) {
   const values = Object.values(await loadOrCreateSecrets(secrets));
   return values.reduce(
@@ -190,6 +230,8 @@ let sessionProxyPid;
 async function startDesktopSessionProxy() {
   [sessionProxyContainer] = await dockerLines([
     "ps",
+    "--filter",
+    `label=com.docker.compose.project=${composeProject}`,
     "--filter",
     "label=com.docker.compose.service=langfuse-web",
     "--format",
@@ -331,6 +373,8 @@ async function reportFailure(error) {
         "ps",
         "-a",
         "--filter",
+        `label=com.docker.compose.project=${composeProject}`,
+        "--filter",
         `label=com.docker.compose.service=${service}`,
         "--format",
         "{{.Names}}",
@@ -356,6 +400,25 @@ async function reportFailure(error) {
   }
 }
 
+async function cleanupSmokeResources() {
+  let firstError;
+  for (const cleanup of [
+    () => supervisor.stop(true),
+    stopDesktopSessionProxy,
+    removeSmokeVolumes,
+    () => rm(root, { recursive: true, force: true }),
+  ]) {
+    try {
+      await cleanup();
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  return firstError;
+}
+
+let failure;
+let cleanupError;
 try {
   await supervisor.start();
   await waitFor(
@@ -363,10 +426,15 @@ try {
     600000,
     "the six-service runtime",
   );
+  assert.equal(
+    startupProbeSucceeded,
+    true,
+    "The startup OTLP probe did not succeed",
+  );
   const containers = await dockerLines([
     "ps",
     "--filter",
-    "label=com.docker.compose.project=confuse",
+    `label=com.docker.compose.project=${composeProject}`,
     "--format",
     "{{.Names}}",
   ]);
@@ -469,44 +537,38 @@ try {
     120000,
     "live Agent telemetry in Langfuse",
   );
-  assert.equal(
-    supervisor.store.dueOutbox("9999-01-01T00:00:00.000Z").length,
-    0,
+  await waitFor(
+    () => supervisor.store.dueOutbox("9999-01-01T00:00:00.000Z").length === 0,
+    120000,
+    "the telemetry outbox to drain",
   );
 
   await stopDesktopSessionProxy();
-  await invoke("desktop.quit");
+  await invoke("desktop.quit", undefined, 90000);
   assert.deepEqual(
     await dockerLines([
       "ps",
       "--filter",
-      "label=com.docker.compose.project=confuse",
+      `label=com.docker.compose.project=${composeProject}`,
       "--format",
       "{{.Names}}",
     ]),
     [],
   );
-  assert.equal(
-    (
-      await dockerLines([
-        "volume",
-        "ls",
-        "--filter",
-        "label=com.docker.compose.project=confuse",
-        "--format",
-        "{{.Name}}",
-      ])
-    ).length,
-    5,
-  );
+  assert.equal((await smokeVolumes()).length, 5);
   console.log(
     "Confuse runtime smoke passed: six services, opt-in history, live SDK ingestion, notification, clean quit, and preserved volumes.",
   );
 } catch (error) {
+  failure = error;
   await reportFailure(error);
-  throw error;
 } finally {
-  await supervisor.stop(true);
-  await stopDesktopSessionProxy();
-  await rm(root, { recursive: true, force: true });
+  cleanupError = await cleanupSmokeResources();
 }
+if (cleanupError) {
+  if (failure === undefined) throw cleanupError;
+  const message =
+    cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+  console.error(await redact(`Smoke cleanup failed: ${message}`));
+}
+if (failure !== undefined) throw failure;
