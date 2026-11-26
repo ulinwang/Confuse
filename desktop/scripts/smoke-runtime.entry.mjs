@@ -257,7 +257,7 @@ async function desktopSessionCookie() {
 
 async function desktopTrace(traceId) {
   const input = encodeURIComponent(
-    JSON.stringify({ traceId, projectId: "confuse-local" }),
+    JSON.stringify({ json: { traceId, projectId: "confuse-local" } }),
   );
   const response = await fetch(
     `${desktopSessionWebUrl}/api/trpc/traces.byId?input=${input}`,
