@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { LangfuseSpanProcessor } from "@langfuse/otel";
+import { context, trace } from "@opentelemetry/api";
 import {
+  createNodeLangfuseV6Client,
   LangfuseV6Delivery,
   validateLocalLangfuseBaseUrl,
   type LangfuseV6Client,
@@ -43,6 +46,33 @@ describe("LangfuseV6Delivery", () => {
       new Date("2026-01-01T00:00:01.000Z"),
     ]);
     expect(client.flushes).toBe(2);
+  });
+
+  it("attaches propagated trace attributes with the real Node SDK", async () => {
+    const start = vi.spyOn(LangfuseSpanProcessor.prototype, "onStart");
+    vi.spyOn(LangfuseSpanProcessor.prototype, "onEnd").mockImplementation(
+      () => {},
+    );
+    const client = createNodeLangfuseV6Client({
+      baseUrl: "http://127.0.0.1:3000",
+      publicKey: "pk-lf-synthetic",
+      secretKey: "sk-lf-synthetic",
+    });
+
+    try {
+      await new LangfuseV6Delivery(client).deliver(telemetryEvent());
+
+      expect(start.mock.calls).toHaveLength(1);
+      expect(start.mock.calls[0]?.[0].attributes).toMatchObject({
+        "session.id": "session",
+        "langfuse.trace.name": "kimi-code session",
+      });
+    } finally {
+      await client.shutdown();
+      context.disable();
+      trace.disable();
+      vi.restoreAllMocks();
+    }
   });
 
   it("only allows local Confuse origins", () => {

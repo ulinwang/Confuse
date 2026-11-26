@@ -54,14 +54,17 @@ jobs:
 
   images:
     needs: prepare
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ["amd64", "arm64"]
     permissions:
       contents: read
       packages: write
     env:
       CONFUSE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-    outputs:
-      public: ${{ steps.visibility.outputs.public }}
+      TARGETARCH: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -76,8 +79,31 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Build and publish multi-architecture images
-        run: node desktop/scripts/build-images.mjs --push --tag "$CONFUSE_RELEASE_VERSION"
+      - name: Build and publish native image
+        run: node desktop/scripts/build-images.mjs --push --platform "linux/$TARGETARCH" --tag "$CONFUSE_RELEASE_VERSION-$TARGETARCH"
+
+  manifest:
+    needs: [prepare, images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    env:
+      CONFUSE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    outputs:
+      public: ${{ steps.visibility.outputs.public }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Publish multi-architecture manifests
+        run: node desktop/scripts/manifest-images.mjs
       - id: visibility
         name: Verify public package access and anonymous pulls
         env:
@@ -104,9 +130,41 @@ jobs:
       - name: Test desktop
         run: pnpm --filter @confuse/desktop test
 
+  smoke:
+    needs: [prepare, manifest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    env:
+      CONFUSE_SMOKE_ISOLATED: "1"
+      CONFUSE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: pnpm/setup@703c52620218391530e48b9e8870d5c0082e1b9b # v2.1.0
+        with:
+          install: false
+          cache: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - run: pnpm install --frozen-lockfile
+      - name: Verify Compose, Agent ingestion, and clean shutdown
+        run: pnpm --filter @confuse/desktop smoke:runtime
+
   dmg:
-    needs: [prepare, images, test]
-    runs-on: macos-14
+    needs: [prepare, images, test, smoke]
+    runs-on: macos-15-intel
     permissions:
       contents: read
     env:
@@ -161,8 +219,8 @@ jobs:
           retention-days: 7
 
   release:
-    needs: [prepare, images, dmg]
-    if: needs.dmg.outputs.signed == 'true' && needs.images.outputs.public == 'true'
+    needs: [prepare, manifest, dmg]
+    if: needs.dmg.outputs.signed == 'true' && needs.manifest.outputs.public == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

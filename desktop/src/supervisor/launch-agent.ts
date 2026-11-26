@@ -32,6 +32,7 @@ export class LaunchAgentManager {
       "LaunchAgents",
       `${LAUNCH_AGENT_LABEL}.plist`,
     ),
+    private readonly platform = process.platform,
   ) {
     if (this.uid === undefined)
       throw new Error("LaunchAgent management requires macOS");
@@ -39,7 +40,7 @@ export class LaunchAgentManager {
   }
 
   async install(): Promise<void> {
-    if (process.platform !== "darwin")
+    if (this.platform !== "darwin")
       throw new Error("LaunchAgent management requires macOS");
     ensurePrivateDirectory(this.config.stateDir);
     const nodePath = resolve(process.execPath);
@@ -105,7 +106,7 @@ export class LaunchAgentManager {
   }
 
   async uninstall(): Promise<void> {
-    if (process.platform !== "darwin")
+    if (this.platform !== "darwin")
       throw new Error("LaunchAgent management requires macOS");
     if (await this.loaded())
       await this.runner.run("/bin/launchctl", [
