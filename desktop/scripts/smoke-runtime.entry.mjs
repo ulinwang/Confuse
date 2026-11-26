@@ -146,13 +146,6 @@ async function dockerLines(args) {
   return stdout.split("\n").filter(Boolean);
 }
 
-async function credentials() {
-  const publicKey = await secrets.get("LANGFUSE_INIT_PROJECT_PUBLIC_KEY");
-  const secretKey = await secrets.get("LANGFUSE_INIT_PROJECT_SECRET_KEY");
-  assert.ok(publicKey && secretKey);
-  return `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`;
-}
-
 async function redact(text) {
   const values = Object.values(await loadOrCreateSecrets(secrets));
   return values.reduce(
@@ -161,18 +154,58 @@ async function redact(text) {
   );
 }
 
-async function publicJson(path) {
-  const response = await fetch(`${config.webUrl}${path}`, {
-    headers: { authorization: await credentials() },
+let sessionCookie;
+async function desktopSessionCookie() {
+  if (sessionCookie) return sessionCookie;
+  const token = await secrets.get("CONFUSE_DESKTOP_AUTH_TOKEN");
+  assert.ok(token);
+  const response = await fetch(`${config.webUrl}/api/desktop/session`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${token}`,
+      host: new URL(config.webUrl).host,
+    },
     signal: AbortSignal.timeout(15000),
   });
+  if (response.status !== 204) {
+    const body = (await response.text()).slice(0, 2000);
+    throw new Error(
+      await redact(
+        `Desktop session exchange returned HTTP ${response.status}: ${body}`,
+      ),
+    );
+  }
+  sessionCookie = response.headers.get("set-cookie")?.split(";")[0];
+  assert.ok(sessionCookie, "Desktop session did not return a cookie");
+  return sessionCookie;
+}
+
+async function desktopTrace(traceId) {
+  const input = encodeURIComponent(
+    JSON.stringify({ traceId, projectId: "confuse-local" }),
+  );
+  const response = await fetch(
+    `${config.webUrl}/api/trpc/traces.byId?input=${input}`,
+    {
+      headers: { cookie: await desktopSessionCookie() },
+      signal: AbortSignal.timeout(15000),
+    },
+  );
   if (!response.ok) {
     const body = (await response.text()).slice(0, 2000);
     throw new Error(
-      await redact(`Web API returned HTTP ${response.status}: ${body}`),
+      await redact(`Trace query returned HTTP ${response.status}: ${body}`),
     );
   }
-  return response.json();
+  const body = await response.json();
+  if (!body.result?.data) {
+    throw new Error(
+      await redact(
+        `Trace response is missing result.data: ${JSON.stringify(body).slice(0, 2000)}`,
+      ),
+    );
+  }
+  return body.result.data;
 }
 
 async function reportFailure(error) {
@@ -216,7 +249,13 @@ async function reportFailure(error) {
       }
     }
   } catch (diagnosticError) {
-    console.error("Could not collect all smoke diagnostics", diagnosticError);
+    const message =
+      diagnosticError instanceof Error
+        ? diagnosticError.message
+        : String(diagnosticError);
+    console.error(
+      await redact(`Could not collect all smoke diagnostics: ${message}`),
+    );
   }
 }
 
@@ -267,10 +306,15 @@ try {
   );
   await waitFor(
     async () => {
-      const traces = await publicJson(
-        `/api/public/traces?sessionId=${encodeURIComponent(historySession)}&useEventsTable=true`,
+      const traceId = createHash("sha256")
+        .update(`kimi-code:${historySession}`)
+        .digest("hex")
+        .slice(0, 32);
+      const trace = await desktopTrace(traceId);
+      return (
+        trace.name === "kimi-code:assistant" &&
+        trace.sessionId === historySession
       );
-      return traces.data?.some((trace) => trace.name === "kimi-code:assistant");
     },
     120000,
     "historical Agent telemetry in Langfuse",
@@ -300,12 +344,8 @@ try {
     .slice(0, 32);
   await waitFor(
     async () => {
-      const traces = await publicJson(
-        `/api/public/traces?sessionId=${encodeURIComponent(liveSession)}&useEventsTable=true`,
-      );
-      return traces.data?.some(
-        (trace) => trace.id === liveTraceId && trace.sessionId === liveSession,
-      );
+      const trace = await desktopTrace(liveTraceId);
+      return trace.id === liveTraceId && trace.sessionId === liveSession;
     },
     120000,
     "live Agent telemetry in Langfuse",
