@@ -280,14 +280,11 @@ async function desktopTrace(traceId) {
     );
   }
   const body = await response.json();
-  if (!body.result?.data) {
-    throw new Error(
-      await redact(
-        `Trace response is missing result.data: ${JSON.stringify(body).slice(0, 2000)}`,
-      ),
-    );
+  const trace = body.result?.data?.json;
+  if (!trace || typeof trace !== "object" || Array.isArray(trace)) {
+    throw new Error("Trace response is missing result.data.json");
   }
-  return body.result.data;
+  return trace;
 }
 
 async function reportFailure(error) {
