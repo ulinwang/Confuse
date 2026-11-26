@@ -295,8 +295,13 @@ export class Supervisor {
     }
   }
 
-  stop(stopCompose = false): Promise<void> {
+  async stop(stopCompose = false): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
+    if (this.quitPromise) {
+      await this.quitPromise;
+      if (this.stopPromise) await this.stopPromise;
+      return;
+    }
     this.stopPromise = this.performStop(stopCompose);
     return this.stopPromise;
   }

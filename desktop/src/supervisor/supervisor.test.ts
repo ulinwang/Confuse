@@ -84,7 +84,10 @@ describe("supervisor IPC", () => {
     vi.restoreAllMocks();
   });
 
-  async function createSupervisor(onStopped?: () => void) {
+  async function createSupervisor(
+    onStopped?: () => void,
+    runner: ProcessRunner = runners,
+  ) {
     const stateDir = mkdtempSync(join(tmpdir(), "confuse-supervisor-"));
     directories.push(stateDir);
     const supervisor = new Supervisor(
@@ -93,7 +96,7 @@ describe("supervisor IPC", () => {
         CONFUSE_OUTBOX_POLL_MS: "100000",
       }),
       {
-        runner: runners,
+        runner,
         secrets: new MemorySecretStore(),
         agentContext: {
           homeDir: stateDir,
@@ -377,6 +380,36 @@ describe("supervisor IPC", () => {
       ),
     );
     await expect(supervisor.stop(false)).rejects.toThrow("Finalization failed");
+  });
+
+  it("shares an in-progress full quit with supervisor cleanup", async () => {
+    let releaseStop!: () => void;
+    const stopGate = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    let downCalls = 0;
+    const blockedRunner: ProcessRunner = {
+      async run(_command, args) {
+        if (args.includes("down")) {
+          downCalls++;
+          await stopGate;
+        }
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const { supervisor, client } = await createSupervisor(
+      undefined,
+      blockedRunner,
+    );
+
+    const quitting = client.request("desktop.quit");
+    await waitFor(() => downCalls === 1);
+    const stopping = supervisor.stop(true);
+    releaseStop();
+    await stopping;
+
+    expect(downCalls).toBe(1);
+    expect((await quitting).ok).toBe(true);
   });
 
   it("stops only the confuse Compose project before acknowledging full quit", async () => {
