@@ -190,7 +190,7 @@ async function startDesktopSessionProxy() {
   ]);
   assert.ok(sessionProxyContainer);
   const script =
-    'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "127.0.0.1");';
+    'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "0.0.0.0");';
   const { stdout } = await execFileAsync("/usr/bin/docker", [
     "exec",
     sessionProxyContainer,
