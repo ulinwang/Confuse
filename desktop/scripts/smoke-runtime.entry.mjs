@@ -177,38 +177,56 @@ async function redact(text) {
 
 const desktopSessionWebUrl = "http://127.0.0.1:39001";
 
+let sessionProxyContainer;
+let sessionProxyPid;
+
 async function startDesktopSessionProxy() {
-  const [webContainer] = await dockerLines([
+  [sessionProxyContainer] = await dockerLines([
     "ps",
     "--filter",
     "label=com.docker.compose.service=langfuse-web",
     "--format",
     "{{.Names}}",
   ]);
-  assert.ok(webContainer);
-  await execFileAsync("/usr/bin/docker", [
-    "run",
-    "--detach",
-    "--rm",
-    "--name",
-    "confuse-smoke-session-proxy",
-    "--network",
-    `container:${webContainer}`,
-    config.webImage,
-    "node",
-    "-e",
-    'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "127.0.0.1");',
+  assert.ok(sessionProxyContainer);
+  const script =
+    'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "127.0.0.1");';
+  const { stdout } = await execFileAsync("/usr/bin/docker", [
+    "exec",
+    sessionProxyContainer,
+    "bash",
+    "-c",
+    `node -e '${script}' > /tmp/confuse-smoke-session-proxy.log 2>&1 & echo $!`,
   ]);
+  sessionProxyPid = stdout.trim();
+  assert.match(sessionProxyPid, /^\d+$/);
+  await waitFor(
+    async () => {
+      const response = await fetch(
+        `${desktopSessionWebUrl}/api/desktop/health`,
+        { signal: AbortSignal.timeout(2000) },
+      );
+      return response.ok;
+    },
+    15000,
+    "the loopback session proxy",
+  );
 }
 
 async function stopDesktopSessionProxy() {
+  if (!sessionProxyContainer || !sessionProxyPid) return;
   await execFileAsync("/usr/bin/docker", [
-    "rm",
-    "-f",
-    "confuse-smoke-session-proxy",
+    "exec",
+    sessionProxyContainer,
+    "bash",
+    "-c",
+    `kill ${sessionProxyPid}`,
   ]).catch((error) => {
-    if (!String(error).includes("No such container")) throw error;
+    if (!/No such process|No such container|not running/.test(String(error))) {
+      throw error;
+    }
   });
+  sessionProxyPid = undefined;
 }
 
 let sessionCookie;
@@ -286,6 +304,19 @@ async function reportFailure(error) {
         traceId: record.payload.traceId,
       }));
     console.error(await redact(`Smoke outbox: ${JSON.stringify(outbox)}`));
+    if (sessionProxyContainer) {
+      const logs = await execFileAsync("/usr/bin/docker", [
+        "exec",
+        sessionProxyContainer,
+        "bash",
+        "-c",
+        "cat /tmp/confuse-smoke-session-proxy.log",
+      ]).catch(() => undefined);
+      if (logs) {
+        const output = `${logs.stdout}\n${logs.stderr}`.slice(-10000);
+        console.error(await redact(`Session proxy logs:\n${output}`));
+      }
+    }
     for (const service of ["langfuse-web", "langfuse-worker"]) {
       const names = await dockerLines([
         "ps",
@@ -413,6 +444,7 @@ try {
     0,
   );
 
+  await stopDesktopSessionProxy();
   await invoke("desktop.quit");
   assert.deepEqual(
     await dockerLines([
