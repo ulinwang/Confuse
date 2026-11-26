@@ -20,12 +20,20 @@ export class HistoryService {
   private readonly store: HistoryServiceOptions["store"];
   private readonly outbox: HistoryServiceOptions["outbox"];
   private readonly now: () => Date;
+  private readonly cursorNamespace?: string;
 
   constructor(options: HistoryServiceOptions) {
     this.sources = options.sources;
     this.store = options.store;
     this.outbox = options.outbox;
     this.now = options.now ?? (() => new Date());
+    this.cursorNamespace = options.cursorNamespace;
+  }
+
+  private cursorId(sourceId: string): string {
+    return this.cursorNamespace
+      ? `${this.cursorNamespace}:${sourceId}`
+      : sourceId;
   }
 
   async preview(kinds: AgentKind[]): Promise<HistoryPreview[]> {
@@ -93,18 +101,18 @@ export class HistoryService {
         (candidate) => candidate.agent === kind,
       )) {
         if (source.kind === "jsonl") {
-          const cursor = await this.store.getCursor(source.id);
+          const cursor = await this.store.getCursor(this.cursorId(source.id));
           const result = await readJsonlIncrementally({
             source,
             cursor: cursor?.kind === "jsonl" ? cursor : undefined,
             signal,
             onLine: async ({ cursor: nextCursor }) => {
-              await this.store.saveCursor(source.id, nextCursor);
+              await this.store.saveCursor(this.cursorId(source.id), nextCursor);
             },
           });
-          await this.store.saveCursor(source.id, result.cursor);
+          await this.store.saveCursor(this.cursorId(source.id), result.cursor);
         } else {
-          const stored = await this.store.getCursor(source.id);
+          const stored = await this.store.getCursor(this.cursorId(source.id));
           const cursor =
             stored?.kind === "dsh" &&
             stored.sessionId === source.sessionId &&
@@ -116,7 +124,7 @@ export class HistoryService {
             cursor,
             signal,
             async (_event, nextCursor) => {
-              await this.store.saveCursor(source.id, nextCursor);
+              await this.store.saveCursor(this.cursorId(source.id), nextCursor);
             },
           );
         }
@@ -129,7 +137,7 @@ export class HistoryService {
     result: HistoryImportResult,
     options: HistoryImportOptions,
   ): Promise<void> {
-    const stored = await this.store.getCursor(source.id);
+    const stored = await this.store.getCursor(this.cursorId(source.id));
     const read = await readJsonlIncrementally({
       source,
       cursor: stored?.kind === "jsonl" ? stored : undefined,
@@ -158,10 +166,10 @@ export class HistoryService {
         } else if (!malformed && text.trim().length > 0) {
           result.skipped += 1;
         }
-        await this.store.saveCursor(source.id, cursor);
+        await this.store.saveCursor(this.cursorId(source.id), cursor);
       },
     });
-    await this.store.saveCursor(source.id, read.cursor);
+    await this.store.saveCursor(this.cursorId(source.id), read.cursor);
   }
 
   private async importDsh(
@@ -169,7 +177,7 @@ export class HistoryService {
     result: HistoryImportResult,
     options: HistoryImportOptions,
   ): Promise<void> {
-    const stored = await this.store.getCursor(source.id);
+    const stored = await this.store.getCursor(this.cursorId(source.id));
     const cursor =
       stored?.kind === "dsh" &&
       stored.sessionId === source.sessionId &&
@@ -190,7 +198,7 @@ export class HistoryService {
           if (inserted) result.enqueued += 1;
           else result.duplicates += 1;
         }
-        await this.store.saveCursor(source.id, nextCursor);
+        await this.store.saveCursor(this.cursorId(source.id), nextCursor);
       },
     );
   }
@@ -305,7 +313,7 @@ export class HistoryService {
   }
 
   private async enqueue(event: HistoryEvent): Promise<boolean> {
-    const telemetry = toTelemetryEvent(event);
+    const telemetry = toTelemetryEvent(event, this.cursorNamespace);
     const now = this.now().toISOString();
     const entry: OutboxEntry = {
       id: telemetry.id,
@@ -319,10 +327,16 @@ export class HistoryService {
   }
 }
 
-function toTelemetryEvent(event: HistoryEvent): TelemetryEvent {
-  const id = createHash("sha256")
+function toTelemetryEvent(
+  event: HistoryEvent,
+  projectId?: string,
+): TelemetryEvent {
+  const legacyId = createHash("sha256")
     .update(`${event.agent}:${event.dedupKey}`)
     .digest("hex");
+  const id = projectId
+    ? createHash("sha256").update(`${projectId}:${legacyId}`).digest("hex")
+    : legacyId;
   return {
     id,
     traceId: deterministicHex(`${event.agent}:${event.sessionId}`, 32),
@@ -340,6 +354,7 @@ function toTelemetryEvent(event: HistoryEvent): TelemetryEvent {
       ...event.metadata,
       agent: event.agent,
       historical: true,
+      ...(projectId ? { projectId } : {}),
     },
   };
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { AGENT_KINDS } from "../../shared/contracts";
-import type { SecretStore } from "../keychain";
+import { AGENT_KINDS, type AgentKind } from "../../shared/contracts";
+import type { AgentProjects } from "../agent-projects";
 import type { OutboxRecord } from "../store";
 import {
   createNodeLangfuseV6Client,
@@ -38,11 +38,10 @@ const telemetryEventSchema = z
   .strict();
 
 export class SdkOutboxDispatcher {
-  private deliveryPromise?: Promise<LangfuseV6Delivery>;
+  private readonly deliveries = new Map<string, Promise<LangfuseV6Delivery>>();
 
   constructor(
-    private readonly secrets: SecretStore,
-    private readonly baseUrl: string,
+    private readonly projects: AgentProjects,
     private readonly createClient: LangfuseClientFactory = createNodeLangfuseV6Client,
   ) {}
 
@@ -54,47 +53,52 @@ export class SdkOutboxDispatcher {
     if (event.id !== record.id) {
       throw new Error("Desktop outbox record and event IDs do not match");
     }
-    const delivery = await this.getDelivery();
+    const projectId =
+      typeof event.metadata?.projectId === "string"
+        ? event.metadata.projectId
+        : undefined;
+    const delivery = await this.getDelivery(event.agent, projectId);
     await delivery.deliver(event);
   }
 
-  private getDelivery(): Promise<LangfuseV6Delivery> {
-    if (!this.deliveryPromise) {
-      const pending = this.createDelivery();
-      this.deliveryPromise = pending;
-      pending.catch(() => {
-        if (this.deliveryPromise === pending) this.deliveryPromise = undefined;
-      });
-    }
-    return this.deliveryPromise;
+  private getDelivery(
+    kind: AgentKind,
+    projectId?: string,
+  ): Promise<LangfuseV6Delivery> {
+    const key = `${kind}:${projectId ?? "confuse-local"}`;
+    const existing = this.deliveries.get(key);
+    if (existing) return existing;
+    const pending = this.createDelivery(kind, projectId);
+    this.deliveries.set(key, pending);
+    pending.catch(() => {
+      if (this.deliveries.get(key) === pending) {
+        this.deliveries.delete(key);
+      }
+    });
+    return pending;
   }
 
-  private async createDelivery(): Promise<LangfuseV6Delivery> {
-    const [publicKey, secretKey] = await Promise.all([
-      this.secrets.get("LANGFUSE_INIT_PROJECT_PUBLIC_KEY"),
-      this.secrets.get("LANGFUSE_INIT_PROJECT_SECRET_KEY"),
-    ]);
-    if (!publicKey || !secretKey) {
-      throw new Error("The local Confuse project keys are not initialized");
-    }
+  private async createDelivery(
+    kind: AgentKind,
+    projectId?: string,
+  ): Promise<LangfuseV6Delivery> {
+    const options = await this.projects.clientOptions(kind, projectId);
     return new LangfuseV6Delivery(
-      this.createClient({
-        baseUrl: this.baseUrl,
-        publicKey,
-        secretKey,
-        environment: "confuse-desktop",
-      }),
+      this.createClient({ ...options, environment: "confuse-desktop" }),
     );
   }
 
   async close(): Promise<void> {
-    const pending = this.deliveryPromise;
-    this.deliveryPromise = undefined;
-    if (!pending) return;
-    try {
-      await (await pending).shutdown();
-    } catch {
-      return;
-    }
+    const pending = [...this.deliveries.values()];
+    this.deliveries.clear();
+    await Promise.all(
+      pending.map(async (delivery) => {
+        try {
+          await (await delivery).shutdown();
+        } catch {
+          return;
+        }
+      }),
+    );
   }
 }

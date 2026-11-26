@@ -24,12 +24,17 @@ import {
   supervisorSocketPath,
 } from "./config";
 import { SupervisorClient } from "./supervisor-client";
-import { installAndStartSupervisor } from "./supervisor-lifecycle";
+import {
+  installAndStartSupervisor,
+  uninstallSupervisor,
+} from "./supervisor-lifecycle";
 
 const desktopChannels = new Set<DesktopChannel>([
   "desktop.get-state",
   "desktop.complete-onboarding",
   "desktop.reopen-onboarding",
+  "desktop.create-organization",
+  "desktop.uninstall",
   "desktop.quit",
   "agents.scan",
   "agents.connect",
@@ -258,7 +263,26 @@ function quitUi(): void {
   app.quit();
 }
 
-async function quitConfuse(): Promise<void> {
+async function waitForSupervisorClose(
+  supervisor: SupervisorClient,
+): Promise<void> {
+  await Promise.race([
+    new Promise<void>((resolve) => supervisor.once("close", resolve)),
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 5_000);
+      timer.unref();
+    }),
+  ]);
+}
+
+async function quitConfuse(uninstall = false): Promise<void> {
+  if (uninstall && fullQuitPromise) {
+    dialog.showErrorBox(
+      "Unable to remove Confuse",
+      "Confuse is already stopping. Reopen it after the current stop finishes to remove integrations.",
+    );
+    return;
+  }
   if (fullQuitPromise) {
     return fullQuitPromise;
   }
@@ -274,7 +298,20 @@ async function quitConfuse(): Promise<void> {
   fullQuitPromise = (async () => {
     quitMode = "stopping";
     try {
+      if (uninstall) {
+        const cleanup = await supervisor.request(
+          "desktop.remove-integrations",
+          undefined,
+        );
+        if (cleanup.state !== "succeeded") {
+          throw new Error(cleanup.message);
+        }
+      }
       await supervisor.request("desktop.quit", undefined);
+      if (uninstall) {
+        await waitForSupervisorClose(supervisor);
+        await uninstallSupervisor();
+      }
       quitMode = "full";
       closeUi();
       app.quit();
@@ -374,6 +411,13 @@ function installSupervisorBridge(): void {
     };
     if (!channel || !desktopChannels.has(channel)) {
       throw new Error("Unsupported desktop IPC channel");
+    }
+    if (channel === "desktop.uninstall") {
+      await quitConfuse(true);
+      if (quitMode !== "full") {
+        throw new Error("Confuse did not complete its uninstall cleanup");
+      }
+      return;
     }
     if (channel === "desktop.quit") {
       await quitConfuse();

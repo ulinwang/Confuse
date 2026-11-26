@@ -123,6 +123,45 @@ describe("HistoryService", () => {
     expect(outbox.entries.size).toBe(2);
   });
 
+  it("reimports legacy history into a project namespace with independent cursors and IDs", async () => {
+    const { file, source } = await jsonlFixture();
+    await writeFile(
+      file,
+      '{"type":"assistant","session_id":"s1","event_id":"e1"}\n',
+    );
+    const history = new MemoryHistoryStore();
+    const outbox = new MemoryOutboxStore();
+    const legacy = new HistoryService({
+      sources: [source],
+      store: history,
+      outbox,
+    });
+    await legacy.import(["kimi-code"]);
+    const legacyEntry = [...outbox.entries.values()][0];
+
+    const project = new HistoryService({
+      sources: [source],
+      store: history,
+      outbox,
+      cursorNamespace: "confuse-kimi-code",
+    });
+    const [migrated] = await project.import(["kimi-code"]);
+    expect(migrated.enqueued).toBe(1);
+    const projectEntry = [...outbox.entries.values()].find(
+      (entry) => entry.id !== legacyEntry.id,
+    );
+    expect(projectEntry).toBeDefined();
+    expect(projectEntry.event.traceId).toBe(legacyEntry.event.traceId);
+    expect(projectEntry.event.metadata).toMatchObject({
+      projectId: "confuse-kimi-code",
+    });
+    expect(history.cursors.has(`confuse-kimi-code:${source.id}`)).toBe(true);
+
+    const [duplicate] = await project.import(["kimi-code"]);
+    expect(duplicate.scanned).toBe(0);
+    expect(outbox.entries.size).toBe(2);
+  });
+
   it("resumes DSH by format and sequence without compressed offsets", async () => {
     const history = new MemoryHistoryStore();
     const outbox = new MemoryOutboxStore();

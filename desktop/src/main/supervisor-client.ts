@@ -156,6 +156,7 @@ export class SupervisorClient extends EventEmitter {
         }
       });
       socket.on("close", () => {
+        this.emit("close");
         if (this.socket === socket) {
           this.socket = null;
           this.buffer = "";

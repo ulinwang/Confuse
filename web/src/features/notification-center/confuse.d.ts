@@ -15,6 +15,12 @@ declare global {
     | "unsupported"
     | "error";
 
+  interface AgentProject {
+    kind: AgentKind;
+    id: string;
+    name: string;
+  }
+
   interface AgentInfo {
     kind: AgentKind;
     displayName: string;
@@ -26,6 +32,7 @@ declare global {
     liveCaptureSupported: boolean;
     historySupported: boolean;
     message?: string;
+    project?: AgentProject;
   }
 
   interface ConnectAgentSelection {
@@ -74,12 +81,24 @@ declare global {
     actionRoute?: string;
   }
 
+  interface DesktopOrganization {
+    id: string;
+    name: string;
+  }
+
+  interface IntegrationCleanupResult {
+    state: "succeeded" | "partially-succeeded" | "failed";
+    message: string;
+  }
+
   interface DesktopState {
     version: 1;
     firstRunComplete: boolean;
     runtime: "starting" | "ready" | "degraded" | "stopped";
     webUrl: string;
     jobs: DesktopJob[];
+    organization?: DesktopOrganization;
+    migrationRequired?: boolean;
   }
 
   interface DesktopRequestMap {
@@ -89,6 +108,18 @@ declare global {
       response: { jobIds: string[] };
     };
     "desktop.reopen-onboarding": { request: undefined; response: undefined };
+    "desktop.create-organization": {
+      request: { name: string };
+      response: DesktopOrganization;
+    };
+    "desktop.remove-integrations": {
+      request: undefined;
+      response: IntegrationCleanupResult;
+    };
+    "desktop.uninstall": {
+      request: undefined;
+      response: IntegrationCleanupResult;
+    };
     "desktop.quit": { request: undefined; response: undefined };
     "agents.scan": { request: undefined; response: AgentInfo[] };
     "agents.connect": {

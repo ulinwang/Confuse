@@ -106,6 +106,10 @@ describe("supervisor IPC", () => {
         onStopped,
       },
     );
+    supervisor.store.saveOrganization({
+      id: "confuse-desktop",
+      name: "Confuse",
+    });
     supervisors.push(supervisor);
     await supervisor.start({ runtime: false });
     const client = new Client();

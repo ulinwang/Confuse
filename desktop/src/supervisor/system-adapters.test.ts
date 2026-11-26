@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -290,6 +291,7 @@ describe("system adapters", () => {
       true,
     );
     await manager.uninstall();
+    expect(existsSync(plistPath)).toBe(false);
     const bootout = runner.calls.find((call) => call.args[0] === "bootout");
     expect(bootout?.args[1]).toBe(
       `gui/${process.getuid()}/com.confuse.supervisor`,

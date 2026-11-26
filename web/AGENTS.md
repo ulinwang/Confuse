@@ -22,7 +22,7 @@
 - Public REST API routes: `src/pages/api/public/*`
 - Public eval APIs: `src/pages/api/public/v2/{evaluators,evaluation-rules}/*`
 - Feature modules: `src/features/*`
-- Desktop bridge UI: `src/features/desktop-onboarding`, `src/features/notification-center`; loopback session exchange: `src/pages/api/desktop/session.ts`
+- Desktop bridge UI: `src/features/desktop-onboarding`, `src/features/notification-center`; loopback session exchange: `src/pages/api/desktop/session.ts`; organization setup and Agent-key revocation: `src/pages/api/desktop/organization.ts`; per-Agent project credentials: `src/pages/api/desktop/projects.ts`
 - Topics: read [`src/features/topics/README.md`](src/features/topics/README.md) before changing access, result queries, run controls, or map interactions.
 - Reusable UI components: `src/components/*`
 - Tests:
@@ -125,7 +125,7 @@ Sentry instrumentation skill first and decide whether it should capture at all
   must be installed, ask the user before doing so.
 - When you surface a score in the UI, always show its level
   (trace/observation/session/experiment) with the `<ScoreTag>` component
-    (`src/components/ScoreTag.tsx`) and its global color coding (see the
+  (`src/components/ScoreTag.tsx`) and its global color coding (see the
   ScoreTag Storybook story).
 - Tailwind is the default styling layer; use the shared palette and globals in
   `src/styles/globals.css`.

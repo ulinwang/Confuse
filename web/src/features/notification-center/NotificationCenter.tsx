@@ -29,6 +29,8 @@ const JOB_STATE_LABELS: Record<JobState, string> = {
   cancelled: "Cancelled",
 };
 
+const PROJECT_SESSIONS_ROUTE = /^\/project\/[a-z0-9-]+\/sessions$/;
+
 const SEVERITY_STYLES: Record<DesktopNotification["severity"], string> = {
   info: "bg-primary",
   success: "bg-dark-green",
@@ -104,8 +106,10 @@ function JobRow({ job, isPending }: { job: DesktopJob; isPending: boolean }) {
 
 function NotificationRow({
   notification,
+  onOpenSessions,
 }: {
   notification: DesktopNotification;
+  onOpenSessions?: () => void;
 }) {
   const isUnread = !notification.readAt;
   return (
@@ -130,6 +134,14 @@ function NotificationRow({
         <p className="text-muted-foreground mt-1 text-xs">
           {formatDate(notification.createdAt)}
         </p>
+        {onOpenSessions && (
+          <Button
+            text="Open project sessions"
+            variant="ghost"
+            size="sm"
+            onClick={onOpenSessions}
+          />
+        )}
       </div>
     </li>
   );
@@ -241,12 +253,25 @@ export function NotificationCenter({
                 <h3 className="mb-2 text-sm font-bold">Recent activity</h3>
                 {snapshot.notifications.length > 0 ? (
                   <ul>
-                    {snapshot.notifications.map((notification) => (
-                      <NotificationRow
-                        key={notification.id}
-                        notification={notification}
-                      />
-                    ))}
+                    {snapshot.notifications.map((notification) => {
+                      const route = notification.actionRoute;
+                      const canOpenSessions =
+                        route && PROJECT_SESSIONS_ROUTE.test(route);
+                      return (
+                        <NotificationRow
+                          key={notification.id}
+                          notification={notification}
+                          onOpenSessions={
+                            canOpenSessions
+                              ? () => {
+                                  setOpen(false);
+                                  router.push(route);
+                                }
+                              : undefined
+                          }
+                        />
+                      );
+                    })}
                   </ul>
                 ) : (
                   <p className="text-muted-foreground text-sm">

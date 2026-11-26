@@ -7,6 +7,12 @@ export const AGENT_KINDS = [
 
 export type AgentKind = (typeof AGENT_KINDS)[number];
 
+export interface AgentProject {
+  kind: AgentKind;
+  id: string;
+  name: string;
+}
+
 export type AgentConnectionState =
   | "not-connected"
   | "waiting-for-review"
@@ -26,6 +32,7 @@ export interface AgentInfo {
   liveCaptureSupported: boolean;
   historySupported: boolean;
   message?: string;
+  project?: AgentProject;
 }
 
 export interface ConnectAgentSelection {
@@ -74,12 +81,24 @@ export interface DesktopNotification {
   actionRoute?: string;
 }
 
+export interface DesktopOrganization {
+  id: string;
+  name: string;
+}
+
 export interface DesktopState {
   version: 1;
   firstRunComplete: boolean;
   runtime: "starting" | "ready" | "degraded" | "stopped";
   webUrl: string;
   jobs: DesktopJob[];
+  organization?: DesktopOrganization;
+  migrationRequired?: boolean;
+}
+
+export interface IntegrationCleanupResult {
+  state: "succeeded" | "partially-succeeded" | "failed";
+  message: string;
 }
 
 interface DesktopRequestMap {
@@ -89,6 +108,18 @@ interface DesktopRequestMap {
     response: { jobIds: string[] };
   };
   "desktop.reopen-onboarding": { request: undefined; response: undefined };
+  "desktop.create-organization": {
+    request: { name: string };
+    response: DesktopOrganization;
+  };
+  "desktop.remove-integrations": {
+    request: undefined;
+    response: IntegrationCleanupResult;
+  };
+  "desktop.uninstall": {
+    request: undefined;
+    response: IntegrationCleanupResult;
+  };
   "desktop.quit": { request: undefined; response: undefined };
   "agents.scan": { request: undefined; response: AgentInfo[] };
   "agents.connect": {

@@ -71,7 +71,10 @@ import { AppShellSidebarPanel } from "@/src/features/app-shell/components/AppShe
 import { useAppShellVariant } from "@/src/features/app-shell/hooks/useAppShellVariant";
 import { DesktopOnboardingModal } from "@/src/features/desktop-onboarding/DesktopOnboardingModal";
 import { useConfuseDesktopBridge } from "@/src/features/notification-center/bridge";
-import { useDesktopFirstRunComplete } from "@/src/features/notification-center/desktopStore";
+import {
+  useDesktopFirstRunComplete,
+  useDesktopStoreSnapshot,
+} from "@/src/features/notification-center/desktopStore";
 
 const CommandMenu = dynamic(
   () =>
@@ -140,6 +143,7 @@ export function AuthenticatedLayout({
   const [desktopOnboardingDismissed, setDesktopOnboardingDismissed] =
     useState(false);
   const desktopBridge = useConfuseDesktopBridge();
+  const desktopState = useDesktopStoreSnapshot().state;
   const desktopFirstRunComplete = useDesktopFirstRunComplete();
   const internalViewMode = useInternalViewMode();
   const router = useRouter();
@@ -387,7 +391,7 @@ export function AuthenticatedLayout({
         </SidebarProvider>
       )}
       {desktopBridge &&
-      desktopFirstRunComplete === false &&
+      (desktopFirstRunComplete === false || desktopState?.migrationRequired) &&
       !desktopOnboardingDismissed ? (
         <DesktopOnboardingModal
           bridge={desktopBridge}

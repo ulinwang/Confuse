@@ -185,12 +185,28 @@ export class JobManager {
       default:
         return;
     }
+    const project = job.agentKind
+      ? this.store.getAgentProject(job.agentKind)
+      : undefined;
+    const canOpenProject =
+      project &&
+      (job.state === "succeeded" || job.state === "partially-succeeded");
+    const pendingDeliveries =
+      job.kind === "history-import" &&
+      (job.state === "succeeded" || job.state === "partially-succeeded")
+        ? this.store.dueOutbox("9999-01-01T00:00:00.000Z").length
+        : 0;
     const notification = this.store.createNotification({
       jobId: job.id,
       severity,
       title,
-      body: job.message,
-      actionRoute: "/?notificationCenter=open",
+      body:
+        pendingDeliveries > 0
+          ? `${job.message} ${pendingDeliveries} telemetry event(s) are still being delivered in the background.`
+          : job.message,
+      actionRoute: canOpenProject
+        ? `/project/${project.id}/sessions`
+        : "/?notificationCenter=open",
     });
     this.events.emit("desktop.notification-created", notification);
   }

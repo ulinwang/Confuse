@@ -1,5 +1,7 @@
 import { join } from "node:path";
+import type { IntegrationCleanupResult } from "../shared/contracts";
 import type { AgentRuntimeAdapter } from "./adapters";
+import { AgentProjectRegistry, type AgentProjects } from "./agent-projects";
 import { createAgentContext } from "./agents/context";
 import { createCodexTrustChecker } from "./agents/codex-trust";
 import type { AgentContext } from "./agents/types";
@@ -23,6 +25,7 @@ export interface SupervisorDependencies {
   runner?: ProcessRunner;
   secrets?: SecretStore;
   fetch?: typeof fetch;
+  projects?: AgentProjects;
   agentContext?: Partial<AgentContext>;
   waitingCodexJobPollMs?: number;
   onStopped?: (exitCode: number) => void;
@@ -36,6 +39,7 @@ export class Supervisor {
   readonly router: SupervisorRouter;
   readonly compose: ComposeManager;
   readonly health: HealthChecker;
+  readonly projects: AgentProjects;
   private readonly socket: SupervisorSocketServer;
   private sdkDispatcher: SdkOutboxDispatcher;
   private readonly startupAbort = new AbortController();
@@ -76,7 +80,16 @@ export class Supervisor {
     });
     this.compose = new ComposeManager(config, secrets, runner);
     this.health = new HealthChecker(config, runner, dependencies.fetch);
-    this.sdkDispatcher = new SdkOutboxDispatcher(secrets, config.webUrl);
+    this.projects =
+      dependencies.projects ??
+      new AgentProjectRegistry({
+        secrets,
+        store: this.store,
+        baseUrl: config.webUrl,
+        fetch: dependencies.fetch,
+        signal: this.startupAbort.signal,
+      });
+    this.sdkDispatcher = new SdkOutboxDispatcher(this.projects);
     this.outbox.setDispatcher((record) => this.sdkDispatcher.dispatch(record));
     const agentContext = createAgentContext({
       ...dependencies.agentContext,
@@ -100,11 +113,17 @@ export class Supervisor {
       context: agentContext,
       store: this.store,
       jobs: this.jobs,
+      projects: this.projects,
       onEnqueued: () => void this.outbox.flush(),
     });
     this.agentAdapter = agentAdapter;
-    this.router = new SupervisorRouter(this.store, this.jobs, this.events, () =>
-      this.quit(),
+    this.router = new SupervisorRouter(
+      this.store,
+      this.jobs,
+      this.events,
+      () => this.quit(),
+      (name) => this.projects.ensureOrganization(name),
+      () => this.removeIntegrations(),
     );
     this.router.setAgentAdapter(agentAdapter);
     this.socket = new SupervisorSocketServer(
@@ -234,6 +253,49 @@ export class Supervisor {
   ): void {
     const state = this.store.updateDesktopState({ runtime });
     this.events.emit("desktop.state-changed", state);
+  }
+
+  private async removeIntegrations(): Promise<IntegrationCleanupResult> {
+    try {
+      await this.jobs.stop();
+      await this.outbox.stop();
+      if (!this.agentAdapter?.removeIntegrations) {
+        throw new Error(
+          "Agent cleanup is unavailable in this supervisor build",
+        );
+      }
+      const result = await this.agentAdapter.removeIntegrations();
+      if (result.state !== "succeeded") {
+        const state =
+          result.state === "failed" ? "failed" : "partially-succeeded";
+        this.store.createNotification({
+          severity: state === "failed" ? "error" : "warning",
+          title: "Confuse cleanup is incomplete",
+          body: result.message,
+          actionRoute: "/?notificationCenter=open",
+        });
+        return { state, message: result.message };
+      }
+      await this.projects.revoke();
+      this.store.resetIntegrations();
+      const message = `${result.message} Agent project keys were revoked. Langfuse projects and history are preserved.`;
+      this.store.createNotification({
+        severity: "success",
+        title: "Confuse integrations removed",
+        body: message,
+        actionRoute: "/?notificationCenter=open",
+      });
+      return { state: "succeeded", message };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.store.createNotification({
+        severity: "error",
+        title: "Confuse cleanup failed",
+        body: message,
+        actionRoute: "/?notificationCenter=open",
+      });
+      return { state: "failed", message };
+    }
   }
 
   private quit(): Promise<void> {

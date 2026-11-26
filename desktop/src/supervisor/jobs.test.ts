@@ -15,6 +15,7 @@ describe("JobManager", () => {
     store = new DesktopStore(":memory:");
     events = new SupervisorEvents();
     jobs = new JobManager(store, events);
+    store.saveOrganization({ id: "confuse-desktop", name: "Confuse" });
     jobs.start();
   });
 

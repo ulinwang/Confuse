@@ -15,11 +15,13 @@ import type {
 import {
   connectAgents,
   detectAgentConnectionState,
+  disconnectAgents,
   normalizeAgentPayload,
   scanAgents,
 } from "./agents";
 import { agentPaths } from "./agents/adapter-utils";
 import type { AgentContext } from "./agents/types";
+import { agentProjectId, type AgentProjects } from "./agent-projects";
 import { discoverJsonlHistorySources } from "./history/discovery";
 import { openDshHistory } from "./history/dsh";
 import { HistoryService } from "./history/service";
@@ -63,6 +65,7 @@ export interface AgentRuntimeAdapterDependencies {
   context: AgentContext;
   store: DesktopStore;
   jobs: JobManager;
+  projects: AgentProjects;
   onEnqueued?: () => void;
 }
 
@@ -70,6 +73,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
   private readonly context: AgentContext;
   private readonly store: DesktopStore;
   private readonly jobs: JobManager;
+  private readonly projects: AgentProjects;
   private readonly onEnqueued?: () => void;
   private resumePromise?: Promise<void>;
   private codexExecutionObservedJobId?: string;
@@ -78,6 +82,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     this.context = dependencies.context;
     this.store = dependencies.store;
     this.jobs = dependencies.jobs;
+    this.projects = dependencies.projects;
     this.onEnqueued = dependencies.onEnqueued;
   }
 
@@ -102,6 +107,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
           configPath: selection.configPath ?? info.configPath,
           connectionState,
           historySupported: info.historySupported,
+          project: this.store.getAgentProject(info.kind),
           ...(message === undefined ? {} : { message }),
         };
       }),
@@ -113,6 +119,8 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     context: AgentJobContext,
   ): Promise<AgentJobResult> {
     context.report(0.1, `Connecting ${selection.kind}`);
+    const project = await this.projects.ensure(selection.kind);
+    context.report(0.2, `Preparing ${project.name}`);
     const expectedConfigPath = agentPaths(
       { kind: selection.kind, importHistory: selection.importHistory },
       this.context,
@@ -165,6 +173,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
         const count = await this.recordWatermarks(
           selection.kind,
           context.signal,
+          project.id,
         );
         message = `${message} History starts after the current position in ${count} discovered source(s).`;
       } catch (error) {
@@ -177,6 +186,34 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
       }
     }
     return { state, message };
+  }
+
+  async removeIntegrations(): Promise<AgentJobResult> {
+    const messages: string[] = [];
+    let failures = 0;
+    for (const kind of AGENT_KINDS) {
+      const selection = this.store.getAgentConnection(kind)?.selection ?? {
+        kind,
+        importHistory: false,
+      };
+      try {
+        const results = await disconnectAgents(
+          [{ ...selection, importHistory: false }],
+          this.context,
+        );
+        for (const result of results) {
+          if (result.state === "error") failures += 1;
+          messages.push(result.message);
+        }
+      } catch (error) {
+        failures += 1;
+        messages.push(`${kind}: ${errorMessage(error)}`);
+      }
+    }
+    return {
+      state: failures > 0 ? "partially-succeeded" : "succeeded",
+      message: messages.join(" "),
+    };
   }
 
   async previewHistory(kinds: AgentKind[]): Promise<HistoryPreview[]> {
@@ -195,6 +232,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     kind: AgentKind,
     context: AgentJobContext,
   ): Promise<AgentJobResult> {
+    const project = await this.projects.ensure(kind);
     context.report(0.1, `Discovering authorized ${kind} history`);
     const [result] = await this.withHistoryService(
       kind,
@@ -209,6 +247,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
             );
           },
         }),
+      project.id,
     );
     if (result.enqueued > 0) this.onEnqueued?.();
     const message = historyResultMessage(result);
@@ -290,6 +329,10 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
     let inserted = false;
     for (const event of events) {
       const telemetry = ingestionToTelemetry(parsed.data.agent, event);
+      telemetry.metadata = {
+        ...telemetry.metadata,
+        projectId: agentProjectId(parsed.data.agent),
+      };
       const entry: OutboxEntry = {
         id: telemetry.id,
         event: telemetry,
@@ -316,17 +359,24 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
   private async recordWatermarks(
     kind: AgentKind,
     signal: AbortSignal,
+    projectId: string,
   ): Promise<number> {
-    return this.withHistoryService(kind, signal, async (service, count) => {
-      await service.recordWatermarks([kind], signal);
-      return count;
-    });
+    return this.withHistoryService(
+      kind,
+      signal,
+      async (service, count) => {
+        await service.recordWatermarks([kind], signal);
+        return count;
+      },
+      projectId,
+    );
   }
 
   private async withHistoryService<T>(
     kind: AgentKind,
     signal: AbortSignal | undefined,
     operation: (service: HistoryService, sourceCount: number) => Promise<T>,
+    cursorNamespace?: string,
   ): Promise<T> {
     if (kind === "deepseek-harness") {
       const connection = await openDshHistory(
@@ -335,7 +385,7 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
       );
       try {
         return await operation(
-          this.createHistoryService(connection.sources),
+          this.createHistoryService(connection.sources, cursorNamespace),
           connection.sources.length,
         );
       } finally {
@@ -343,14 +393,21 @@ export class DesktopAgentRuntimeAdapter implements AgentRuntimeAdapter {
       }
     }
     const sources = await this.sourcesFor(kind);
-    return operation(this.createHistoryService(sources), sources.length);
+    return operation(
+      this.createHistoryService(sources, cursorNamespace),
+      sources.length,
+    );
   }
 
-  private createHistoryService(sources: HistorySource[]): HistoryService {
+  private createHistoryService(
+    sources: HistorySource[],
+    cursorNamespace?: string,
+  ): HistoryService {
     return new HistoryService({
       sources,
       store: this.store,
       outbox: this.store,
+      cursorNamespace,
     });
   }
 
