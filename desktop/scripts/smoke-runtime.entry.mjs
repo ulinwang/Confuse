@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { readSupervisorConfig } from "../src/supervisor/config";
-import { MemorySecretStore } from "../src/supervisor/keychain";
+import {
+  loadOrCreateSecrets,
+  MemorySecretStore,
+} from "../src/supervisor/keychain";
 import { Supervisor } from "../src/supervisor/supervisor";
 
 const execFileAsync = promisify(execFile);
@@ -33,7 +36,7 @@ await writeFile(
     type: "assistant",
     session_id: historySession,
     event_id: "synthetic-history-event",
-    timestamp: "2026-01-01T00:00:00.000Z",
+    timestamp: new Date().toISOString(),
   })}\n`,
 );
 const fakeKimi = join(bin, "kimi");
@@ -150,13 +153,71 @@ async function credentials() {
   return `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`;
 }
 
+async function redact(text) {
+  const values = Object.values(await loadOrCreateSecrets(secrets));
+  return values.reduce(
+    (output, value) => output.replaceAll(value, "[redacted]"),
+    text,
+  );
+}
+
 async function publicJson(path) {
   const response = await fetch(`${config.webUrl}${path}`, {
     headers: { authorization: await credentials() },
     signal: AbortSignal.timeout(15000),
   });
-  assert.equal(response.ok, true, `Web API returned HTTP ${response.status}`);
+  if (!response.ok) {
+    const body = (await response.text()).slice(0, 2000);
+    throw new Error(
+      await redact(`Web API returned HTTP ${response.status}: ${body}`),
+    );
+  }
   return response.json();
+}
+
+async function reportFailure(error) {
+  try {
+    const message =
+      error instanceof Error ? (error.stack ?? error.message) : String(error);
+    console.error(await redact(`Smoke failure: ${message}`));
+    const jobs = supervisor.store.listJobs().map((job) => ({
+      kind: job.kind,
+      state: job.state,
+      message: job.message,
+    }));
+    console.error(await redact(`Smoke jobs: ${JSON.stringify(jobs)}`));
+    const outbox = supervisor.store
+      .dueOutbox("9999-01-01T00:00:00.000Z")
+      .map((record) => ({
+        id: record.id,
+        attempts: record.attempts,
+        agent: record.payload.agent,
+        name: record.payload.name,
+        traceId: record.payload.traceId,
+      }));
+    console.error(await redact(`Smoke outbox: ${JSON.stringify(outbox)}`));
+    for (const service of ["langfuse-web", "langfuse-worker"]) {
+      const names = await dockerLines([
+        "ps",
+        "-a",
+        "--filter",
+        `label=com.docker.compose.service=${service}`,
+        "--format",
+        "{{.Names}}",
+      ]);
+      for (const name of names) {
+        const logs = await execFileAsync(
+          "/usr/bin/docker",
+          ["logs", "--tail", "120", name],
+          { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
+        );
+        const output = `${logs.stdout}\n${logs.stderr}`.slice(-20000);
+        console.error(await redact(`${service} recent logs:\n${output}`));
+      }
+    }
+  } catch (diagnosticError) {
+    console.error("Could not collect all smoke diagnostics", diagnosticError);
+  }
 }
 
 try {
@@ -207,7 +268,7 @@ try {
   await waitFor(
     async () => {
       const traces = await publicJson(
-        `/api/public/traces?sessionId=${encodeURIComponent(historySession)}`,
+        `/api/public/traces?sessionId=${encodeURIComponent(historySession)}&useEventsTable=true`,
       );
       return traces.data?.some((trace) => trace.name === "kimi-code:assistant");
     },
@@ -239,8 +300,12 @@ try {
     .slice(0, 32);
   await waitFor(
     async () => {
-      const trace = await publicJson(`/api/public/traces/${liveTraceId}`);
-      return trace.id === liveTraceId && trace.sessionId === liveSession;
+      const traces = await publicJson(
+        `/api/public/traces?sessionId=${encodeURIComponent(liveSession)}&useEventsTable=true`,
+      );
+      return traces.data?.some(
+        (trace) => trace.id === liveTraceId && trace.sessionId === liveSession,
+      );
     },
     120000,
     "live Agent telemetry in Langfuse",
@@ -277,6 +342,9 @@ try {
   console.log(
     "Confuse runtime smoke passed: six services, opt-in history, live SDK ingestion, notification, clean quit, and preserved volumes.",
   );
+} catch (error) {
+  await reportFailure(error);
+  throw error;
 } finally {
   await supervisor.stop(true);
   await rm(root, { recursive: true, force: true });

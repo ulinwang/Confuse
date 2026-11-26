@@ -128,10 +128,9 @@ export class HealthChecker {
   }
 
   async verifyIngestion(secrets: DesktopSecrets): Promise<void> {
-    const id = randomUUID();
-    const now = new Date().toISOString();
+    const now = Date.now();
     const response = await this.fetchImpl(
-      `${this.config.webUrl}/api/public/ingestion`,
+      `${this.config.webUrl}/api/public/otel/v1/traces`,
       {
         method: "POST",
         signal: AbortSignal.timeout(15_000),
@@ -142,25 +141,62 @@ export class HealthChecker {
           ).toString("base64")}`,
         },
         body: JSON.stringify({
-          batch: [
+          resourceSpans: [
             {
-              id: randomUUID(),
-              type: "trace-create",
-              timestamp: now,
-              body: {
-                id,
-                name: "Confuse startup check",
-                timestamp: now,
-                metadata: { source: "desktop-supervisor", synthetic: true },
+              resource: {
+                attributes: [
+                  {
+                    key: "service.name",
+                    value: { stringValue: "confuse-desktop" },
+                  },
+                ],
               },
+              scopeSpans: [
+                {
+                  scope: { name: "confuse-desktop" },
+                  spans: [
+                    {
+                      traceId: randomUUID().replaceAll("-", ""),
+                      spanId: randomUUID().replaceAll("-", "").slice(0, 16),
+                      name: "Confuse startup check",
+                      kind: 1,
+                      startTimeUnixNano: `${now}000000`,
+                      endTimeUnixNano: `${now + 1}000000`,
+                      attributes: [
+                        {
+                          key: "synthetic",
+                          value: { boolValue: true },
+                        },
+                        {
+                          key: "source",
+                          value: { stringValue: "desktop-supervisor" },
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
             },
           ],
         }),
       },
     );
-    if (!response.ok)
+    if (!response.ok) {
       throw new Error(
         `Synthetic ingestion failed with HTTP ${response.status}`,
       );
+    }
+    const body: unknown = await response.json().catch(() => undefined);
+    if (
+      typeof body === "object" &&
+      body !== null &&
+      "partialSuccess" in body &&
+      typeof body.partialSuccess === "object" &&
+      body.partialSuccess !== null &&
+      "rejectedSpans" in body.partialSuccess &&
+      Number(body.partialSuccess.rejectedSpans) > 0
+    ) {
+      throw new Error("Synthetic ingestion rejected its span");
+    }
   }
 }

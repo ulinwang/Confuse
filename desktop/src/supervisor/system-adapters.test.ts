@@ -12,7 +12,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { COMPOSE_SERVICES, ComposeManager } from "./compose";
 import { readSupervisorConfig } from "./config";
 import { HealthChecker } from "./health";
-import { MacOsKeychain, MemorySecretStore } from "./keychain";
+import {
+  loadOrCreateSecrets,
+  MacOsKeychain,
+  MemorySecretStore,
+} from "./keychain";
 import { LaunchAgentManager } from "./launch-agent";
 import {
   ProcessRunError,
@@ -166,6 +170,36 @@ describe("system adapters", () => {
       "http://127.0.0.1:3000/api/desktop/health",
       "http://127.0.0.1:3000/api/desktop/health",
     ]);
+  });
+
+  it("verifies synthetic ingestion through the OTel endpoint", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "confuse-otel-health-"));
+    directories.push(stateDir);
+    const requests: { url: string; body: any }[] = [];
+    const checker = new HealthChecker(
+      config(stateDir),
+      new MockRunner(),
+      async (input, init) => {
+        requests.push({
+          url: String(input),
+          body: JSON.parse(String(init?.body)),
+        });
+        return Response.json({});
+      },
+    );
+
+    await checker.verifyIngestion(
+      await loadOrCreateSecrets(new MemorySecretStore()),
+    );
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe(
+      "http://127.0.0.1:3000/api/public/otel/v1/traces",
+    );
+    const span = requests[0].body.resourceSpans[0].scopeSpans[0].spans[0];
+    expect(span).toMatchObject({ name: "Confuse startup check", kind: 1 });
+    expect(span.traceId).toMatch(/^[a-f0-9]{32}$/);
+    expect(span.spanId).toMatch(/^[a-f0-9]{16}$/);
   });
 
   it("keeps Keychain values out of process arguments", async () => {
