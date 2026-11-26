@@ -206,6 +206,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Build macOS DMGs sequentially
         run: pnpm --filter @confuse/desktop make:mac
+      - name: Verify launchd accepts the packaged application
+        run: pnpm --filter @confuse/desktop smoke:launch-agent
       - name: Verify exactly one ARM64 and one x64 DMG
         run: node desktop/scripts/verify-dmgs.mjs
       - name: Upload DMG CI artifacts
