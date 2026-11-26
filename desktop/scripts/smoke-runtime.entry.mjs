@@ -410,7 +410,8 @@ try {
         .slice(0, 32);
       const trace = await desktopTrace(traceId);
       if (
-        trace.name === "kimi-code:assistant" &&
+        trace.id === traceId &&
+        trace.name === "kimi-code session" &&
         trace.sessionId === historySession
       ) {
         return true;

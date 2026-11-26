@@ -127,6 +127,7 @@ export function createNodeLangfuseV6Client(
     spanProcessors: [processor],
     idGenerator: ids,
   });
+  provider.register();
   setLangfuseTracerProvider(provider);
 
   return {
