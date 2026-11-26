@@ -25,7 +25,7 @@ export interface SupervisorDependencies {
   runner?: ProcessRunner;
   secrets?: SecretStore;
   fetch?: typeof fetch;
-  projects?: AgentProjects;
+  projects?: AgentProjects | ((store: DesktopStore) => AgentProjects);
   agentContext?: Partial<AgentContext>;
   waitingCodexJobPollMs?: number;
   onStopped?: (exitCode: number) => void;
@@ -81,14 +81,16 @@ export class Supervisor {
     this.compose = new ComposeManager(config, secrets, runner);
     this.health = new HealthChecker(config, runner, dependencies.fetch);
     this.projects =
-      dependencies.projects ??
-      new AgentProjectRegistry({
-        secrets,
-        store: this.store,
-        baseUrl: config.webUrl,
-        fetch: dependencies.fetch,
-        signal: this.startupAbort.signal,
-      });
+      typeof dependencies.projects === "function"
+        ? dependencies.projects(this.store)
+        : (dependencies.projects ??
+          new AgentProjectRegistry({
+            secrets,
+            store: this.store,
+            baseUrl: config.webUrl,
+            fetch: dependencies.fetch,
+            signal: this.startupAbort.signal,
+          }));
     this.sdkDispatcher = new SdkOutboxDispatcher(this.projects);
     this.outbox.setDispatcher((record) => this.sdkDispatcher.dispatch(record));
     const agentContext = createAgentContext({

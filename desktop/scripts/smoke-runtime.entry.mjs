@@ -20,6 +20,7 @@ import {
   loadOrCreateSecrets,
   MemorySecretStore,
 } from "../src/supervisor/keychain";
+import { AgentProjectRegistry } from "../src/supervisor/agent-projects";
 import { Supervisor } from "../src/supervisor/supervisor";
 
 const execFileAsync = promisify(execFile);
@@ -90,20 +91,29 @@ await writeFile(
   ),
 );
 const secrets = new MemorySecretStore();
+const desktopSessionWebUrl = "http://127.0.0.1:39001";
+const desktopFetch = async (input, init) => {
+  const response = await fetch(input, init);
+  if (!response.ok && String(input).includes("/api/desktop/")) {
+    const body = await response.clone().text();
+    console.error(
+      await redact(
+        `Desktop API returned HTTP ${response.status}: ${body.slice(0, 1000)}`,
+      ),
+    );
+  }
+  return response;
+};
 const supervisor = new Supervisor(config, {
   secrets,
-  fetch: async (input, init) => {
-    const response = await fetch(input, init);
-    if (!response.ok && String(input).includes("/api/desktop/")) {
-      const body = await response.clone().text();
-      console.error(
-        await redact(
-          `Desktop API returned HTTP ${response.status}: ${body.slice(0, 1000)}`,
-        ),
-      );
-    }
-    return response;
-  },
+  projects: (store) =>
+    new AgentProjectRegistry({
+      secrets,
+      store,
+      baseUrl: desktopSessionWebUrl,
+      fetch: desktopFetch,
+    }),
+  fetch: desktopFetch,
   agentContext: {
     homeDir: home,
     env: { HOME: home, PATH: bin },
@@ -230,8 +240,6 @@ async function redact(text) {
     text,
   );
 }
-
-const desktopSessionWebUrl = "http://127.0.0.1:39001";
 
 function desktopSessionUrl(path) {
   const url = new URL(path, desktopSessionWebUrl);
@@ -455,6 +463,7 @@ try {
     "{{.Names}}",
   ]);
   assert.equal(containers.length, 6, containers.join(", "));
+  await startDesktopSessionProxy();
 
   const agents = await invoke("agents.scan");
   assert.equal(
@@ -517,7 +526,6 @@ try {
         notification.actionRoute === "/project/confuse-claude-code/sessions",
     ),
   );
-  await startDesktopSessionProxy();
   const historyTraceId = createHash("sha256")
     .update(`kimi-code:${historySession}`)
     .digest("hex")
