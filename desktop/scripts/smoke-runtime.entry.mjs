@@ -177,6 +177,13 @@ async function redact(text) {
 
 const desktopSessionWebUrl = "http://127.0.0.1:39001";
 
+function desktopSessionUrl(path) {
+  const url = new URL(path, desktopSessionWebUrl);
+  assert.equal(url.origin, desktopSessionWebUrl);
+  assert.equal(url.hostname, "127.0.0.1");
+  return url;
+}
+
 let sessionProxyContainer;
 let sessionProxyPid;
 
@@ -202,10 +209,9 @@ async function startDesktopSessionProxy() {
   assert.match(sessionProxyPid, /^\d+$/);
   await waitFor(
     async () => {
-      const response = await fetch(
-        `${desktopSessionWebUrl}/api/desktop/health`,
-        { signal: AbortSignal.timeout(2000) },
-      );
+      const response = await fetch(desktopSessionUrl("/api/desktop/health"), {
+        signal: AbortSignal.timeout(2000),
+      });
       return response.ok;
     },
     15000,
@@ -230,11 +236,12 @@ async function stopDesktopSessionProxy() {
 }
 
 let sessionCookie;
+let observedTrace;
 async function desktopSessionCookie() {
   if (sessionCookie) return sessionCookie;
   const token = await secrets.get("CONFUSE_DESKTOP_AUTH_TOKEN");
   assert.ok(token);
-  const response = await fetch(`${desktopSessionWebUrl}/api/desktop/session`, {
+  const response = await fetch(desktopSessionUrl("/api/desktop/session"), {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,
@@ -260,7 +267,7 @@ async function desktopTrace(traceId) {
     JSON.stringify({ json: { traceId, projectId: "confuse-local" } }),
   );
   const response = await fetch(
-    `${desktopSessionWebUrl}/api/trpc/traces.byId?input=${input}`,
+    desktopSessionUrl(`/api/trpc/traces.byId?input=${input}`),
     {
       headers: { cookie: await desktopSessionCookie() },
       signal: AbortSignal.timeout(15000),
@@ -304,6 +311,11 @@ async function reportFailure(error) {
         traceId: record.payload.traceId,
       }));
     console.error(await redact(`Smoke outbox: ${JSON.stringify(outbox)}`));
+    if (observedTrace) {
+      console.error(
+        await redact(`Observed trace: ${JSON.stringify(observedTrace)}`),
+      );
+    }
     if (sessionProxyContainer) {
       const logs = await execFileAsync("/usr/bin/docker", [
         "exec",
@@ -400,10 +412,20 @@ try {
         .digest("hex")
         .slice(0, 32);
       const trace = await desktopTrace(traceId);
-      return (
+      if (
         trace.name === "kimi-code:assistant" &&
         trace.sessionId === historySession
-      );
+      ) {
+        return true;
+      }
+      observedTrace = {
+        id: trace.id,
+        name: trace.name,
+        sessionId: trace.sessionId,
+        projectId: trace.projectId,
+        metadata: trace.metadata,
+      };
+      return false;
     },
     120000,
     "historical Agent telemetry in Langfuse",
@@ -434,7 +456,17 @@ try {
   await waitFor(
     async () => {
       const trace = await desktopTrace(liveTraceId);
-      return trace.id === liveTraceId && trace.sessionId === liveSession;
+      if (trace.id === liveTraceId && trace.sessionId === liveSession) {
+        return true;
+      }
+      observedTrace = {
+        id: trace.id,
+        name: trace.name,
+        sessionId: trace.sessionId,
+        projectId: trace.projectId,
+        metadata: trace.metadata,
+      };
+      return false;
     },
     120000,
     "live Agent telemetry in Langfuse",
