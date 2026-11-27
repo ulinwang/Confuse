@@ -565,6 +565,44 @@ describe("organization and cleanup lifecycle", () => {
     ).toBe("succeeded");
   });
 
+  it("reports disconnected status after removing newly created hooks", async () => {
+    const fixture = await createFixture();
+    await Promise.all([
+      installFakeKimi(fixture.bin),
+      installFakeClaude(fixture.bin),
+    ]);
+    await fixture.supervisor.start({ runtime: false });
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [
+        { kind: "kimi-code", importHistory: false },
+        { kind: "claude-code", importHistory: false },
+      ],
+    });
+    await fixture.supervisor.jobs.drain();
+    for (const jobId of connected.result.jobIds) {
+      expect(fixture.supervisor.store.getJob(jobId).job.state).toBe(
+        "succeeded",
+      );
+    }
+
+    const removed = await invoke(
+      fixture.socketPath,
+      "desktop.remove-integrations",
+      undefined,
+    );
+    expect(removed.result.state).toBe("succeeded");
+    const scanned = await invoke(fixture.socketPath, "agents.scan");
+    for (const kind of ["kimi-code", "claude-code"]) {
+      const agent = scanned.result.find(
+        (candidate: { kind: string }) => candidate.kind === kind,
+      );
+      expect(
+        agent.connectionState,
+        `${kind}: ${agent.message ?? "No diagnostic message"}`,
+      ).toBe("not-connected");
+    }
+  });
+
   it("removes only Confuse-managed integrations from all Agent homes", async () => {
     const fixture = await createFixture({
       isCodexHookTrusted: async () => true,

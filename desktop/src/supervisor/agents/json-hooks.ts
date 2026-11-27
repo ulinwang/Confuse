@@ -38,7 +38,8 @@ function groupsFor(
   create: boolean,
 ): HookGroup[] {
   const hooks = config.hooks;
-  if (hooks === undefined && create) {
+  if (hooks === undefined) {
+    if (!create) return [];
     config.hooks = {};
     return groupsFor(config, event, create);
   }
