@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { LayerProvider } from "@/src/context/LayerContext/LayerContext";
 import { NotificationCenter } from "./NotificationCenter";
@@ -59,6 +59,64 @@ describe("NotificationCenter", () => {
     expect(screen.getByRole("progressbar")).toHaveAttribute(
       "aria-valuenow",
       "42",
+    );
+    view.unmount();
+  });
+
+  it("opens only validated Agent project session links", async () => {
+    router.push.mockClear();
+    const notifications: DesktopNotification[] = [
+      {
+        id: "project-notification",
+        severity: "success",
+        title: "Agent connection completed",
+        body: "History is being delivered.",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        actionRoute: "/project/confuse-kimi-code/sessions",
+      },
+      {
+        id: "external-notification",
+        severity: "info",
+        title: "External route",
+        body: "External URLs are not accepted.",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        actionRoute: "https://example.com",
+      },
+    ];
+    const bridge: ConfuseBridge = {
+      invoke: vi.fn(async (channel: DesktopChannel) => {
+        if (channel === "desktop.get-state") {
+          return {
+            version: 1,
+            firstRunComplete: true,
+            runtime: "ready",
+            webUrl: "http://127.0.0.1:3000",
+            jobs: [],
+          };
+        }
+        if (channel === "notifications.list") return notifications;
+        throw new Error(`Unexpected channel: ${channel}`);
+      }) as ConfuseBridge["invoke"],
+      subscribe: vi.fn(() => () => undefined),
+    };
+    window.confuse = bridge;
+
+    const view = render(
+      <NotificationCenter>
+        {({ unreadCount }) => <button>Notifications ({unreadCount})</button>}
+      </NotificationCenter>,
+      { wrapper: LayerProvider },
+    );
+
+    const link = await screen.findByRole("button", {
+      name: "Open project sessions",
+    });
+    expect(
+      screen.getAllByRole("button", { name: "Open project sessions" }),
+    ).toHaveLength(1);
+    fireEvent.click(link);
+    expect(router.push).toHaveBeenCalledWith(
+      "/project/confuse-kimi-code/sessions",
     );
     view.unmount();
   });

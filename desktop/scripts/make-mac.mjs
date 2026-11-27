@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { signMacApplication } from "./sign-mac-application.mjs";
 
 const desktopRoot = fileURLToPath(new URL("../", import.meta.url));
 await rm(path.join(desktopRoot, "out", "make"), {
@@ -9,11 +10,11 @@ await rm(path.join(desktopRoot, "out", "make"), {
   force: true,
 });
 
-function make(arch) {
+function forge(command, arch, ...args) {
   return new Promise((resolve, reject) => {
     const child = spawn(
       "electron-forge",
-      ["make", "--platform=darwin", `--arch=${arch}`],
+      [command, "--platform=darwin", `--arch=${arch}`, ...args],
       {
         cwd: desktopRoot,
         env: process.env,
@@ -36,5 +37,7 @@ function make(arch) {
 }
 
 for (const arch of ["arm64", "x64"]) {
-  await make(arch);
+  await forge("package", arch);
+  await signMacApplication(arch);
+  await forge("make", arch, "--skip-package");
 }

@@ -3,6 +3,8 @@ import { AGENT_KINDS } from "../shared/contracts";
 import type {
   ConnectAgentSelection,
   DesktopChannel,
+  DesktopOrganization,
+  IntegrationCleanupResult,
 } from "../shared/contracts";
 import type { SupervisorRequest } from "../shared/protocol";
 import type { AgentRuntimeAdapter } from "./adapters";
@@ -35,6 +37,11 @@ const payloadSchemas = {
   "desktop.get-state": z.undefined(),
   "desktop.complete-onboarding": selections,
   "desktop.reopen-onboarding": z.undefined(),
+  "desktop.create-organization": z
+    .object({ name: z.string().trim().min(1).max(80) })
+    .strict(),
+  "desktop.remove-integrations": z.undefined(),
+  "desktop.uninstall": z.undefined(),
   "desktop.quit": z.undefined(),
   "agents.scan": z.undefined(),
   "agents.connect": selections,
@@ -75,6 +82,10 @@ export class SupervisorRouter {
     private readonly jobs: JobManager,
     private readonly events: SupervisorEvents,
     private readonly quit: () => Promise<void>,
+    private readonly createOrganization: (
+      name: string,
+    ) => Promise<DesktopOrganization>,
+    private readonly removeIntegrations: () => Promise<IntegrationCleanupResult>,
   ) {
     jobs.register("connect", async (payload, context) => {
       const { selections: selected } = selections.parse(payload);
@@ -145,6 +156,15 @@ export class SupervisorRouter {
         this.events.emit("desktop.state-changed", state);
         return undefined;
       }
+      case "desktop.create-organization":
+        return this.createOrganization((payload as { name: string }).name);
+      case "desktop.remove-integrations":
+        return this.removeIntegrations();
+      case "desktop.uninstall":
+        throw new RequestError(
+          "UNSUPPORTED",
+          "Application uninstall is managed by the desktop shell",
+        );
       case "desktop.quit":
         await this.quit();
         return undefined;
@@ -190,7 +210,10 @@ export class SupervisorRouter {
   private connect(input: { selections: ConnectAgentSelection[] }): {
     jobIds: string[];
   } {
-    if (input.selections.length > 0) this.requireAdapter();
+    if (input.selections.length > 0) {
+      this.requireOrganization();
+      this.requireAdapter();
+    }
     uniqueKinds(input.selections);
     return {
       jobIds: input.selections.map(
@@ -207,6 +230,7 @@ export class SupervisorRouter {
   private startHistory(input: { kinds: z.infer<typeof agentKind>[] }): {
     jobIds: string[];
   } {
+    this.requireOrganization();
     this.requireAdapter();
     const unique = [...new Set(input.kinds)];
     return {
@@ -219,6 +243,15 @@ export class SupervisorRouter {
           }).id,
       ),
     };
+  }
+
+  private requireOrganization(): void {
+    if (!this.store.getOrganization()) {
+      throw new RequestError(
+        "ORGANIZATION_REQUIRED",
+        "Create the Confuse organization before connecting Agents",
+      );
+    }
   }
 
   private requireAdapter(): AgentRuntimeAdapter {

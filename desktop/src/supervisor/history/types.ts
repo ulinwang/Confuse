@@ -110,6 +110,7 @@ export interface HistoryServiceOptions {
   store: HistoryStore;
   outbox: Pick<OutboxStore, "putIfAbsent">;
   now?: () => Date;
+  cursorNamespace?: string;
 }
 
 export interface HistoryImportOptions {

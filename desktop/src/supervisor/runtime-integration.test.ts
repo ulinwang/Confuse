@@ -7,6 +7,7 @@ import {
   appendFile,
   stat,
   readdir,
+  readFile,
 } from "node:fs/promises";
 import { request } from "node:http";
 import { createConnection } from "node:net";
@@ -24,6 +25,7 @@ import {
   type JsonlCompression,
 } from "@deepseek-ai/dsh-session-persistence-jsonl";
 import { readSupervisorConfig } from "./config";
+import type { AgentProjects } from "./agent-projects";
 import { discoverJsonlHistorySources } from "./history/discovery";
 import { MemorySecretStore } from "./keychain";
 import type { OutboxRecord } from "./store";
@@ -110,7 +112,9 @@ describe("supervisor Agent integration", () => {
       { kind: "kimi-code", importHistory: false },
       join(fixture.root, "home", ".kimi-code"),
     );
-    const cursor = await fixture.supervisor.store.getCursor(sources[0].id);
+    const cursor = await fixture.supervisor.store.getCursor(
+      `confuse-kimi-code:${sources[0].id}`,
+    );
     expect(cursor).toMatchObject({
       offset: (await stat(fixture.historyFile)).size,
     });
@@ -531,40 +535,248 @@ describe("supervisor Agent integration", () => {
   });
 });
 
-describe("SdkOutboxDispatcher", () => {
-  it("reads local project keys from the secret store and flushes through the SDK", async () => {
-    const secrets = new MemorySecretStore();
-    await secrets.set("LANGFUSE_INIT_PROJECT_PUBLIC_KEY", "pk-lf-synthetic");
-    await secrets.set("LANGFUSE_INIT_PROJECT_SECRET_KEY", "sk-lf-synthetic");
-    const client = new FakeClient();
-    let options: NodeLangfuseV6Options | undefined;
-    const dispatcher = new SdkOutboxDispatcher(
-      secrets,
-      "http://127.0.0.1:3000",
-      (received) => {
-        options = received;
-        return client;
-      },
+describe("organization and cleanup lifecycle", () => {
+  it("requires an organization before changing Agent configuration", async () => {
+    const fixture = await createFixture();
+    await installFakeKimi(fixture.bin);
+    await fixture.supervisor.start({ runtime: false });
+    fixture.supervisor.store.resetIntegrations();
+
+    const denied = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "kimi-code", importHistory: false }],
+    });
+    expect(denied.ok).toBe(false);
+    expect(denied.error.code).toBe("ORGANIZATION_REQUIRED");
+    expect(fixture.supervisor.store.listJobs()).toHaveLength(0);
+
+    const organization = await invoke(
+      fixture.socketPath,
+      "desktop.create-organization",
+      { name: "Confuse" },
     );
-    const event = telemetryEvent();
-    await dispatcher.dispatch({
-      id: event.id,
-      kind: "telemetry",
-      payload: event,
-      attempts: 0,
-      nextAttemptAt: event.timestamp!,
-      createdAt: event.timestamp!,
+    expect(organization.ok).toBe(true);
+    const allowed = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [{ kind: "kimi-code", importHistory: false }],
+    });
+    expect(allowed.ok).toBe(true);
+    await fixture.supervisor.jobs.drain();
+    expect(
+      fixture.supervisor.store.getJob(allowed.result.jobIds[0]).job.state,
+    ).toBe("succeeded");
+  });
+
+  it("reports disconnected status after removing newly created hooks", async () => {
+    const fixture = await createFixture();
+    await Promise.all([
+      installFakeKimi(fixture.bin),
+      installFakeClaude(fixture.bin),
+    ]);
+    await fixture.supervisor.start({ runtime: false });
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [
+        { kind: "kimi-code", importHistory: false },
+        { kind: "claude-code", importHistory: false },
+      ],
+    });
+    await fixture.supervisor.jobs.drain();
+    for (const jobId of connected.result.jobIds) {
+      expect(fixture.supervisor.store.getJob(jobId).job.state).toBe(
+        "succeeded",
+      );
+    }
+
+    const removed = await invoke(
+      fixture.socketPath,
+      "desktop.remove-integrations",
+      undefined,
+    );
+    expect(removed.result.state).toBe("succeeded");
+    const scanned = await invoke(fixture.socketPath, "agents.scan");
+    for (const kind of ["kimi-code", "claude-code"]) {
+      const agent = scanned.result.find(
+        (candidate: { kind: string }) => candidate.kind === kind,
+      );
+      expect(
+        agent.connectionState,
+        `${kind}: ${agent.message ?? "No diagnostic message"}`,
+      ).toBe("not-connected");
+    }
+  });
+
+  it("removes only Confuse-managed integrations from all Agent homes", async () => {
+    const fixture = await createFixture({
+      isCodexHookTrusted: async () => true,
+    });
+    await Promise.all([
+      installFakeKimi(fixture.bin),
+      installFakeClaude(fixture.bin),
+      installFakeDsh(fixture.bin),
+      installFakeCodex(fixture.applications),
+    ]);
+    await Promise.all([
+      mkdir(join(fixture.home, ".kimi-code"), { recursive: true }),
+      mkdir(join(fixture.home, ".claude"), { recursive: true }),
+      mkdir(join(fixture.home, ".codex"), { recursive: true }),
+      mkdir(join(fixture.home, ".dsh"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        join(fixture.home, ".kimi-code", "config.toml"),
+        'default_model = "user-model"\n',
+      ),
+      writeFile(
+        join(fixture.home, ".claude", "settings.json"),
+        JSON.stringify({
+          otherSetting: true,
+          hooks: {
+            Stop: [
+              {
+                matcher: "user",
+                hooks: [{ type: "command", command: "user-command" }],
+              },
+            ],
+          },
+        }),
+      ),
+      writeFile(
+        join(fixture.home, ".codex", "hooks.json"),
+        JSON.stringify({
+          description: "mine",
+          hooks: {
+            Stop: [{ hooks: [{ type: "command", command: "user-command" }] }],
+          },
+        }),
+      ),
+      writeFile(
+        join(fixture.home, ".dsh", "cordis.patch.yml"),
+        "plugins:\n  - path: user-plugin\n",
+      ),
+    ]);
+    await fixture.supervisor.start({ runtime: false });
+    const connected = await invoke(fixture.socketPath, "agents.connect", {
+      selections: [
+        { kind: "kimi-code", importHistory: false },
+        { kind: "chatgpt-codex", importHistory: false },
+        { kind: "claude-code", importHistory: false },
+        { kind: "deepseek-harness", importHistory: false },
+      ],
+    });
+    expect(connected.ok).toBe(true);
+    await fixture.supervisor.jobs.drain();
+    for (const jobId of connected.result.jobIds) {
+      expect(fixture.supervisor.store.getJob(jobId).job.state).toBe(
+        "succeeded",
+      );
+    }
+    fixture.supervisor.store.saveAgentProject({
+      kind: "kimi-code",
+      id: "confuse-kimi-code",
+      name: "Kimi Code",
     });
 
-    expect(options).toEqual({
-      baseUrl: "http://127.0.0.1:3000",
-      publicKey: "pk-lf-synthetic",
-      secretKey: "sk-lf-synthetic",
-      environment: "confuse-desktop",
+    const removed = await invoke(
+      fixture.socketPath,
+      "desktop.remove-integrations",
+      undefined,
+    );
+    expect(removed.ok).toBe(true);
+    expect(removed.result.state).toBe("succeeded");
+    expect(removed.result.message).toContain("history are preserved");
+
+    const [kimi, claude, codex, dsh] = await Promise.all([
+      readFile(join(fixture.home, ".kimi-code", "config.toml"), "utf8"),
+      readFile(join(fixture.home, ".claude", "settings.json"), "utf8"),
+      readFile(join(fixture.home, ".codex", "hooks.json"), "utf8"),
+      readFile(join(fixture.home, ".dsh", "cordis.patch.yml"), "utf8"),
+    ]);
+    expect(kimi).toContain("user-model");
+    expect(kimi).not.toContain("confuse-agent-connector");
+    expect(claude).toContain("otherSetting");
+    expect(claude).toContain("user-command");
+    expect(claude).not.toContain("confuse-forward.mjs");
+    expect(codex).toContain("mine");
+    expect(codex).toContain("user-command");
+    expect(codex).not.toContain("confuse-forward.mjs");
+    expect(dsh).toContain("user-plugin");
+    expect(dsh).not.toContain("confuse-plugin");
+    for (const script of [
+      join(fixture.home, ".kimi-code", "hooks", "confuse-forward.mjs"),
+      join(fixture.home, ".claude", "hooks", "confuse-forward.mjs"),
+      join(fixture.home, ".codex", "hooks", "confuse-forward.mjs"),
+      join(fixture.home, ".dsh", "confuse-plugin", "index.js"),
+    ]) {
+      await expect(stat(script)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(fixture.supervisor.store.getOrganization()).toBeUndefined();
+    expect(
+      fixture.supervisor.store.getAgentConnection("kimi-code"),
+    ).toBeUndefined();
+    expect(
+      fixture.supervisor.store.getAgentProject("kimi-code"),
+    ).toBeUndefined();
+  });
+});
+
+describe("SdkOutboxDispatcher", () => {
+  it("isolates Agent project clients and the legacy default project", async () => {
+    const options: NodeLangfuseV6Options[] = [];
+    const clients: FakeClient[] = [];
+    const projects: AgentProjects = {
+      ensureOrganization: async () => ({
+        id: "confuse-desktop",
+        name: "Confuse",
+      }),
+      revoke: async () => undefined,
+      ensure: async (kind) => ({
+        kind,
+        id: `confuse-${kind}`,
+        name: kind,
+      }),
+      clientOptions: async (kind, projectId) => ({
+        baseUrl: "http://127.0.0.1:3000",
+        publicKey: projectId ? `pk-lf-${kind}` : "pk-lf-default",
+        secretKey: projectId ? `sk-lf-${kind}` : "sk-lf-default",
+      }),
+    };
+    const dispatcher = new SdkOutboxDispatcher(projects, (received) => {
+      options.push(received);
+      const client = new FakeClient();
+      clients.push(client);
+      return client;
     });
-    expect(client.flushes).toBe(1);
+    const kimi = telemetryEvent();
+    kimi.metadata = { projectId: "confuse-kimi-code" };
+    const claude = {
+      ...telemetryEvent(),
+      id: "claude-event",
+      agent: "claude-code" as const,
+      metadata: { projectId: "confuse-claude-code" },
+    };
+    const legacy = { ...telemetryEvent(), id: "legacy-event" };
+    for (const event of [kimi, claude, legacy]) {
+      await dispatcher.dispatch({
+        id: event.id,
+        kind: "telemetry",
+        payload: event,
+        attempts: 0,
+        nextAttemptAt: event.timestamp!,
+        createdAt: event.timestamp!,
+      });
+    }
+
+    expect(options.map((option) => option.publicKey)).toEqual([
+      "pk-lf-kimi-code",
+      "pk-lf-claude-code",
+      "pk-lf-default",
+    ]);
+    expect(options.map((option) => option.environment)).toEqual([
+      "confuse-desktop",
+      "confuse-desktop",
+      "confuse-desktop",
+    ]);
+    expect(clients.map((client) => client.flushes)).toEqual([1, 1, 1]);
     await dispatcher.close();
-    expect(client.shutdowns).toBe(1);
+    expect(clients.map((client) => client.shutdowns)).toEqual([1, 1, 1]);
   });
 });
 
@@ -588,6 +800,24 @@ async function createFixture(
     mkdir(historyDirectory, { recursive: true }),
   ]);
   const socketPath = join(stateDir, "supervisor.sock");
+  const projects: AgentProjects = {
+    ensureOrganization: async () => {
+      const organization = { id: "confuse-desktop", name: "Confuse" };
+      supervisor.store.saveOrganization(organization);
+      return organization;
+    },
+    revoke: async () => undefined,
+    ensure: async (kind) => ({
+      kind,
+      id: `confuse-${kind}`,
+      name: kind,
+    }),
+    clientOptions: async (kind, projectId) => ({
+      baseUrl: "http://127.0.0.1:3000",
+      publicKey: projectId ? `pk-lf-${kind}` : "pk-lf-default",
+      secretKey: projectId ? `sk-lf-${kind}` : "sk-lf-default",
+    }),
+  };
   const supervisor = new Supervisor(
     readSupervisorConfig({
       CONFUSE_STATE_DIR: stateDir,
@@ -595,6 +825,7 @@ async function createFixture(
     }),
     {
       secrets: new MemorySecretStore(),
+      projects,
       agentContext: {
         homeDir: home,
         env: { HOME: home, PATH: bin },
@@ -606,6 +837,7 @@ async function createFixture(
       waitingCodexJobPollMs: options.waitingCodexJobPollMs,
     },
   );
+  supervisor.store.saveOrganization({ id: "confuse-desktop", name: "Confuse" });
   supervisors.push(supervisor);
   return {
     supervisor,
@@ -630,6 +862,12 @@ async function installFakeCodex(applications: string): Promise<void> {
 async function installFakeKimi(bin: string): Promise<void> {
   const executable = join(bin, "kimi");
   await writeFile(executable, "#!/bin/sh\necho 'kimi 1.2.3'\n");
+  await chmod(executable, 0o755);
+}
+
+async function installFakeClaude(bin: string): Promise<void> {
+  const executable = join(bin, "claude");
+  await writeFile(executable, "#!/bin/sh\necho 'claude 1.2.3'\n");
   await chmod(executable, 0o755);
 }
 

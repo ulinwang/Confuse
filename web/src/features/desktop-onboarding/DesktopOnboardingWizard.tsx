@@ -8,6 +8,8 @@ import {
   AGENT_LABELS,
 } from "@/src/features/notification-center/bridge";
 import { desktopStore } from "@/src/features/notification-center/desktopStore";
+import { CleanupStep } from "./CleanupStep";
+import { OrganizationStep } from "./OrganizationStep";
 
 const CONNECTION_STATE_LABELS: Record<AgentConnectionState, string> = {
   "not-connected": "Not connected",
@@ -26,7 +28,12 @@ type SelectionState = Record<
 type ScanState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; agents: AgentInfo[] };
+  | {
+      status: "ready";
+      agents: AgentInfo[];
+      organization?: DesktopOrganization;
+      migrationRequired?: boolean;
+    };
 
 function completeAgentScan(agents: AgentInfo[]): AgentInfo[] {
   return AGENT_KINDS.map((kind) => {
@@ -51,7 +58,10 @@ function createInitialSelections(agents: AgentInfo[]): SelectionState {
     agents.map((agent) => [
       agent.kind,
       {
-        selected: agent.installed && agent.liveCaptureSupported,
+        selected:
+          agent.installed &&
+          agent.liveCaptureSupported &&
+          agent.connectionState === "connected",
         importHistory: false,
       },
     ]),
@@ -148,6 +158,11 @@ function AgentRow({
           <p className="text-muted-foreground mt-1 text-xs">
             {agentSupportMessage(agent)}
           </p>
+          {agent.project && (
+            <p className="text-muted-foreground mt-1 text-xs">
+              Langfuse project: {agent.project.name}
+            </p>
+          )}
           {agent.message && (
             <p className="text-muted-foreground mt-1 text-xs">
               {agent.message}
@@ -369,22 +384,54 @@ function ReviewStep({
 function DesktopOnboardingForm({
   bridge,
   initialAgents,
+  organization,
+  upgradeRequired = false,
   onFinished,
 }: {
   bridge: ConfuseBridge;
   initialAgents: AgentInfo[];
+  organization?: DesktopOrganization;
+  upgradeRequired?: boolean;
   onFinished: () => void;
 }) {
   const [selectionState, setSelectionState] = useState<SelectionState>(() =>
     createInitialSelections(initialAgents),
   );
-  const [step, setStep] = useState<"select" | "review">("select");
+  const [view, setView] = useState<"setup" | "cleanup">("setup");
+  const [step, setStep] = useState<"organization" | "select" | "review">(
+    organization ? "select" : "organization",
+  );
+  const [organizationName, setOrganizationName] = useState(
+    organization?.name ?? "Confuse",
+  );
   const [previews, setPreviews] = useState<HistoryPreview[]>([]);
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [isRemoving, setIsRemoving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const selections = buildSelections(initialAgents, selectionState);
+
+  async function createOrganization() {
+    setIsCreating(true);
+    setError(null);
+    try {
+      await bridge.invoke("desktop.create-organization", {
+        name: organizationName.trim(),
+      });
+      desktopStore.refresh();
+      setStep("select");
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "Could not create the organization. Try again.",
+      );
+    } finally {
+      setIsCreating(false);
+    }
+  }
 
   async function review() {
     setIsPreviewing(true);
@@ -421,38 +468,95 @@ function DesktopOnboardingForm({
     }
   }
 
+  async function remove() {
+    setIsRemoving(true);
+    setError(null);
+    try {
+      await bridge.invoke("desktop.uninstall", undefined);
+      desktopStore.refresh();
+      onFinished();
+    } catch (cause) {
+      setError(
+        cause instanceof Error && cause.message
+          ? cause.message
+          : "Could not remove Confuse integrations. Try again.",
+      );
+    } finally {
+      setIsRemoving(false);
+    }
+  }
+
+  if (view === "cleanup") {
+    return (
+      <CleanupStep
+        isRemoving={isRemoving}
+        error={error}
+        onBack={() => {
+          setView("setup");
+          setError(null);
+        }}
+        onRemove={() => remove()}
+      />
+    );
+  }
+
+  const content = {
+    organization: (
+      <OrganizationStep
+        name={organizationName}
+        upgradeRequired={upgradeRequired}
+        isCreating={isCreating}
+        error={error}
+        onNameChange={setOrganizationName}
+        onCreate={() => createOrganization()}
+      />
+    ),
+    select: (
+      <SelectionStep
+        agents={initialAgents}
+        selectionState={selectionState}
+        isPreviewing={isPreviewing}
+        error={error}
+        onSelectionChange={(kind, selection) =>
+          setSelectionState((current) => ({
+            ...current,
+            [kind]: selection,
+          }))
+        }
+        onReview={() => review()}
+      />
+    ),
+    review: (
+      <ReviewStep
+        agents={initialAgents}
+        selections={selections}
+        previews={previews}
+        privacyAccepted={privacyAccepted}
+        isStarting={isStarting}
+        error={error}
+        onPrivacyAcceptedChange={setPrivacyAccepted}
+        onBack={() => {
+          setStep("select");
+          setError(null);
+        }}
+        onStart={() => start()}
+      />
+    ),
+  }[step];
+
   return (
     <div className="flex flex-col gap-5">
-      {step === "select" ? (
-        <SelectionStep
-          agents={initialAgents}
-          selectionState={selectionState}
-          isPreviewing={isPreviewing}
-          error={error}
-          onSelectionChange={(kind, selection) =>
-            setSelectionState((current) => ({
-              ...current,
-              [kind]: selection,
-            }))
-          }
-          onReview={() => review()}
-        />
-      ) : (
-        <ReviewStep
-          agents={initialAgents}
-          selections={selections}
-          previews={previews}
-          privacyAccepted={privacyAccepted}
-          isStarting={isStarting}
-          error={error}
-          onPrivacyAcceptedChange={setPrivacyAccepted}
-          onBack={() => {
-            setStep("select");
+      {content}
+      <div className="flex justify-end border-t pt-3">
+        <Button
+          text="Remove Confuse integrations"
+          variant="ghost"
+          onClick={() => {
+            setView("cleanup");
             setError(null);
           }}
-          onStart={() => start()}
         />
-      )}
+      </div>
     </div>
   );
 }
@@ -469,13 +573,17 @@ export function DesktopOnboardingWizard({
 
   useEffect(() => {
     let active = true;
-    bridge
-      .invoke("agents.scan", undefined)
-      .then((agents) => {
+    Promise.all([
+      bridge.invoke("agents.scan", undefined),
+      bridge.invoke("desktop.get-state", undefined),
+    ])
+      .then(([agents, state]) => {
         if (active) {
           setScanState({
             status: "ready",
             agents: completeAgentScan(agents),
+            organization: state.organization,
+            migrationRequired: state.migrationRequired,
           });
         }
       })
@@ -535,6 +643,8 @@ export function DesktopOnboardingWizard({
     <DesktopOnboardingForm
       bridge={bridge}
       initialAgents={scanState.agents}
+      organization={scanState.organization}
+      upgradeRequired={scanState.migrationRequired}
       onFinished={onFinished}
     />
   );

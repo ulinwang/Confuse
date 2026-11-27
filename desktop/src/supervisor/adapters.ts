@@ -21,9 +21,10 @@ export interface AgentRuntimeAdapter {
     kind: AgentKind,
     context: AgentJobContext,
   ): Promise<AgentJobResult>;
+  removeIntegrations?(): Promise<AgentJobResult>;
 }
 
 export interface AgentJobResult {
-  state?: "succeeded" | "partially-succeeded" | "waiting-for-review";
+  state?: "succeeded" | "partially-succeeded" | "waiting-for-review" | "failed";
   message: string;
 }

@@ -1,35 +1,28 @@
 # Desktop onboarding
 
-## Surface
+## Flow
 
-First-run and manually reopened desktop Agent setup. Users choose among four discovered Agents, opt into history per Agent, review the configuration and privacy scope, then schedule daemon work in the background.
+1. `OrganizationStep` creates the desktop organization before any Agent project.
+2. `DesktopOnboardingWizard` loads only installation metadata and desktop state. New Agents are unselected by default; existing connected Agents stay selected. History remains opt-in.
+3. Review and privacy confirmation enqueue per-Agent connection work. Each Agent receives its own Langfuse project and Keychain-scoped credentials.
+4. Notifications link to the corresponding project Session page without exposing credentials.
 
-## Entry Points
+Legacy connections without an organization require this upgrade flow. Startup never creates an organization, projects, or history imports automatically.
 
-- `DesktopOnboardingModal.tsx` is mounted by `AuthenticatedLayout` only when the desktop bridge exists and `firstRunComplete` is false.
-- `DesktopOnboardingPage.tsx` backs `/desktop-onboarding` for manual reopening and a non-desktop explanatory state.
+## Ownership
 
-## Structure
+- `DesktopOnboardingWizard.tsx`: scan state, selections, history preview, and workflow actions.
+- `OrganizationStep.tsx`: organization name and creation confirmation.
+- `CleanupStep.tsx`: explicit removal of Confuse-managed integrations. It preserves Agent settings, projects, history, Docker volumes, and infrastructure secrets.
+- `../desktop/server/*`: loopback-only organization and per-Agent project provisioning with the desktop bearer token.
+- `desktop/src/supervisor/agent-projects.ts`: organization/project registry, secret storage, project-scoped SDK options, and revocation.
+- `desktop/src/supervisor/history/*`: project-scoped history cursors and migration from the legacy default project.
 
-- `DesktopOnboardingWizard.tsx` owns IPC discovery, loaded-data gating, selection state, preview, and submission.
-- Modal and page wrappers own dismissal/navigation; the wizard owns neither.
+Cleanup is not a normal quit. The desktop shell stops background jobs and delivery before disconnecting managed Agent blocks, revoking Agent keys, stopping Compose, removing the LaunchAgent, and deleting desktop/Agent credentials. Deleting `Confuse.app` without this flow cannot remove those integrations.
 
-## External Consumers
+## Verification
 
-The classic and next sidebars link here through the notification center. `AuthenticatedLayout` adds a desktop-only account settings link.
-
-## State Ownership
-
-Discovered Agents and previews come from IPC. The inner form seeds selection state only after discovery resolves; history always starts false. Completion and task progress remain in the daemon and notification-center store.
-
-## Performance And Stability Boundaries
-
-Discovery runs once per wizard mount or explicit retry. Selection changes rerender only the wizard, not the application shell. No high-frequency subscriptions live in this feature.
-
-## Migration State
-
-The current shape separates loaded-data preparation from editable form state. If manual config-path selection is added, keep it in the selection model and include only metadata in any future analytics.
-
-## Development Context
-
-Keep renderer types aligned with `desktop/src/shared/contracts.ts`. Discovery must not read credentials or session bodies; history access requires an explicit per-Agent choice.
+- `DesktopOnboardingWizard.clienttest.tsx`: organization-before-Agent ordering, default-minimal selection, history opt-in, and the distinct cleanup flow.
+- `desktop/src/supervisor/agent-projects.test.ts`: project isolation, reuse, missing-organization rejection, credential preservation, and revocation.
+- `desktop/src/supervisor/runtime-integration.test.ts`: organization-required protocol and removal of only Confuse-managed files across all four Agent homes.
+- `web/src/__tests__/server/unit/desktop-{organization,projects}.servertest.ts`: loopback authentication, owner scoping, per-Agent credentials, cross-tenant rejection, and idempotent legacy cleanup.

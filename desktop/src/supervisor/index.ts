@@ -50,12 +50,11 @@ async function main(): Promise<void> {
       context: agentContext,
       store: supervisor.store,
       jobs: supervisor.jobs,
+      projects: supervisor.projects,
       onEnqueued: () => void supervisor.outbox.flush(),
     }),
   );
-  supervisor.setOutboxDispatcher(
-    new SdkOutboxDispatcher(secrets, config.webUrl),
-  );
+  supervisor.setOutboxDispatcher(new SdkOutboxDispatcher(supervisor.projects));
   const shutdown = () => void supervisor.stop(false);
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

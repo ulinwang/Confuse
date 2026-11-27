@@ -1,14 +1,11 @@
 import path from "node:path";
 import { app } from "electron";
 import { readSupervisorConfig } from "../supervisor/config";
+import { clearAgentCredentials, MacOsKeychain } from "../supervisor/keychain";
 import { LaunchAgentManager } from "../supervisor/launch-agent";
 import { NodeProcessRunner } from "../supervisor/process";
 
-export async function installAndStartSupervisor(): Promise<void> {
-  if (process.platform !== "darwin") {
-    throw new Error("Confuse desktop supervisor requires macOS");
-  }
-
+function desktopConfiguration() {
   const developmentRoot = path.resolve(__dirname, "../..");
   const applicationRoot = app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked")
@@ -16,7 +13,7 @@ export async function installAndStartSupervisor(): Promise<void> {
   const resourceDir = app.isPackaged
     ? path.join(process.resourcesPath, "resources")
     : path.join(developmentRoot, "resources");
-  const config = readSupervisorConfig({
+  return readSupervisorConfig({
     ...process.env,
     CONFUSE_STATE_DIR: process.env.CONFUSE_STATE_DIR ?? app.getPath("userData"),
     CONFUSE_RESOURCE_DIR: process.env.CONFUSE_RESOURCE_DIR ?? resourceDir,
@@ -35,6 +32,23 @@ export async function installAndStartSupervisor(): Promise<void> {
       process.env.CONFUSE_SUPERVISOR_ENTRY ??
       path.join(applicationRoot, "dist", "supervisor", "index.mjs"),
   });
+}
 
-  await new LaunchAgentManager(config, new NodeProcessRunner()).install();
+export async function installAndStartSupervisor(): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("Confuse desktop supervisor requires macOS");
+  }
+  await new LaunchAgentManager(
+    desktopConfiguration(),
+    new NodeProcessRunner(),
+  ).install();
+}
+
+export async function uninstallSupervisor(): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new Error("Confuse desktop supervisor requires macOS");
+  }
+  const runner = new NodeProcessRunner();
+  await new LaunchAgentManager(desktopConfiguration(), runner).uninstall();
+  await clearAgentCredentials(new MacOsKeychain(runner));
 }

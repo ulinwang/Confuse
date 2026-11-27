@@ -3,8 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   AgentConnectionState,
   AgentKind,
+  AgentProject,
   ConnectAgentSelection,
   DesktopJob,
+  DesktopOrganization,
   DesktopNotification,
   DesktopState,
   JobState,
@@ -161,12 +163,17 @@ export class DesktopStore {
         state TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS agent_projects (
+        kind TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        project_name TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS history_cursors (
         source_id TEXT PRIMARY KEY,
         cursor TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
-      PRAGMA user_version = 2;
+      PRAGMA user_version = 3;
     `);
   }
 
@@ -189,9 +196,13 @@ export class DesktopStore {
     }[];
     const values = new Map(rows.map((row) => [row.key, row.value]));
     const runtime = values.get("runtime");
+    const organization = this.getOrganization();
     return {
       version: 1,
       firstRunComplete: values.get("firstRunComplete") === "true",
+      ...(organization ? { organization } : {}),
+      migrationRequired:
+        !organization && this.listAgentConnections().length > 0,
       runtime:
         runtime === "starting" || runtime === "ready" || runtime === "degraded"
           ? runtime
@@ -215,6 +226,40 @@ export class DesktopStore {
     if (patch.runtime !== undefined) update.run(patch.runtime, "runtime");
     if (patch.webUrl !== undefined) update.run(patch.webUrl, "webUrl");
     return this.getDesktopState();
+  }
+
+  saveOrganization(organization: DesktopOrganization): void {
+    this.database
+      .prepare(
+        `INSERT INTO app_state(key, value) VALUES ('organization', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(JSON.stringify(organization));
+  }
+
+  getOrganization(): DesktopOrganization | undefined {
+    const row = this.database
+      .prepare("SELECT value FROM app_state WHERE key = 'organization'")
+      .get() as { value: string } | undefined;
+    return row
+      ? (parseJson(row.value) as DesktopOrganization | undefined)
+      : undefined;
+  }
+
+  resetIntegrations(): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      this.database.exec(`
+        DELETE FROM agent_connections;
+        DELETE FROM agent_projects;
+        DELETE FROM app_state WHERE key = 'organization';
+        UPDATE app_state SET value = 'false' WHERE key = 'firstRunComplete';
+      `);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   saveAgentConnection(
@@ -248,6 +293,46 @@ export class DesktopStore {
       | undefined;
     if (!selection) return undefined;
     return { selection, state: row.state, updatedAt: row.updated_at };
+  }
+
+  saveAgentProject(project: AgentProject): void {
+    this.database
+      .prepare(
+        `INSERT INTO agent_projects(kind, project_id, project_name) VALUES (?, ?, ?)
+         ON CONFLICT(kind) DO UPDATE SET
+           project_id = excluded.project_id,
+           project_name = excluded.project_name`,
+      )
+      .run(project.kind, project.id, project.name);
+  }
+
+  getAgentProject(kind: AgentKind): AgentProject | undefined {
+    const row = this.database
+      .prepare(
+        "SELECT project_id, project_name FROM agent_projects WHERE kind = ?",
+      )
+      .get(kind) as { project_id: string; project_name: string } | undefined;
+    return row
+      ? { kind, id: row.project_id, name: row.project_name }
+      : undefined;
+  }
+
+  listAgentConnections(): AgentConnectionRecord[] {
+    const rows = this.database
+      .prepare("SELECT selection, state, updated_at FROM agent_connections")
+      .all() as {
+      selection: string;
+      state: AgentConnectionState;
+      updated_at: string;
+    }[];
+    return rows.flatMap((row) => {
+      const selection = parseJson(row.selection) as
+        | ConnectAgentSelection
+        | undefined;
+      return selection
+        ? [{ selection, state: row.state, updatedAt: row.updated_at }]
+        : [];
+    });
   }
 
   async getCursor(sourceId: string): Promise<HistoryCursor | undefined> {
