@@ -15,7 +15,10 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { readSupervisorConfig } from "../src/supervisor/config";
+import {
+  readSupervisorConfig,
+  resolveDockerExecutable,
+} from "../src/supervisor/config";
 import {
   loadOrCreateSecrets,
   MemorySecretStore,
@@ -24,6 +27,7 @@ import { AgentProjectRegistry } from "../src/supervisor/agent-projects";
 import { Supervisor } from "../src/supervisor/supervisor";
 
 const execFileAsync = promisify(execFile);
+const dockerExecutable = resolveDockerExecutable();
 assert.equal(process.env.CI, "true");
 assert.equal(process.env.CONFUSE_SMOKE_ISOLATED, "1");
 
@@ -207,7 +211,7 @@ async function waitFor(check, timeoutMs, description) {
 }
 
 async function dockerLines(args) {
-  const { stdout } = await execFileAsync("/usr/bin/docker", args, {
+  const { stdout } = await execFileAsync(dockerExecutable, args, {
     timeout: 15000,
   });
   return stdout.split("\n").filter(Boolean);
@@ -227,7 +231,7 @@ async function smokeVolumes() {
 async function removeSmokeVolumes() {
   const volumes = await smokeVolumes();
   if (volumes.length > 0) {
-    await execFileAsync("/usr/bin/docker", ["volume", "rm", ...volumes], {
+    await execFileAsync(dockerExecutable, ["volume", "rm", ...volumes], {
       timeout: 15000,
     });
   }
@@ -264,7 +268,7 @@ async function startDesktopSessionProxy() {
   assert.ok(sessionProxyContainer);
   const script =
     'const net = require("net"); net.createServer((client) => { const upstream = net.connect({ host: "127.0.0.1", port: 3000 }); client.pipe(upstream); upstream.pipe(client); client.on("error", () => upstream.destroy()); upstream.on("error", () => client.destroy()); }).listen(39001, "0.0.0.0");';
-  const { stdout } = await execFileAsync("/usr/bin/docker", [
+  const { stdout } = await execFileAsync(dockerExecutable, [
     "exec",
     sessionProxyContainer,
     "bash",
@@ -287,7 +291,7 @@ async function startDesktopSessionProxy() {
 
 async function stopDesktopSessionProxy() {
   if (!sessionProxyContainer || !sessionProxyPid) return;
-  await execFileAsync("/usr/bin/docker", [
+  await execFileAsync(dockerExecutable, [
     "exec",
     sessionProxyContainer,
     "bash",
@@ -380,7 +384,7 @@ async function reportFailure(error) {
       );
     }
     if (sessionProxyContainer) {
-      const logs = await execFileAsync("/usr/bin/docker", [
+      const logs = await execFileAsync(dockerExecutable, [
         "exec",
         sessionProxyContainer,
         "bash",
@@ -405,7 +409,7 @@ async function reportFailure(error) {
       ]);
       for (const name of names) {
         const logs = await execFileAsync(
-          "/usr/bin/docker",
+          dockerExecutable,
           ["logs", "--tail", "120", name],
           { timeout: 15000, maxBuffer: 4 * 1024 * 1024 },
         );
